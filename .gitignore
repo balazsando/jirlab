@@ -1,0 +1,38 @@
+# Binaries (top-level build output only — pre-built /bin/ releases are tracked)
+jirlab
+*.exe
+*.dll
+*.so
+*.dylib
+!/bin/jirlab
+!/bin/jirlab.exe
+
+# Test binaries
+*.test
+*.out
+
+# Build output
+dist/
+
+# Go module cache artifacts
+vendor/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug logs
+debug.log
+*.log
