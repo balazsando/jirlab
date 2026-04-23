@@ -152,6 +152,7 @@ After saving, reload: `source ~/.zshrc`
 | Key | Action |
 |-----|--------|
 | `1` – `5` | Switch between tabs |
+| `0` | Refresh tables |
 | `?` | Open keyboard help (section-specific hotkeys + colour legend) |
 | `esc` | Close modal / dismiss error |
 | `q` | Quit |

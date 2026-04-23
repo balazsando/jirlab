@@ -8,10 +8,9 @@ import (
 
 const (
 	StatusInProgress       = "In Progress"
-	StatusTestEnv          = "Testing"
+	StatusTesting          = "Testing"
 	StatusDone             = "Done"
 	StatusToDo             = "To Do"
-	TransitionIDInProgress = "441"
 	TransitionIDTestEnv    = "541"
 )
 
@@ -23,17 +22,17 @@ func TransitionIssue(jira integration.JiraService, issueKey, transitionID string
 	return nil
 }
 
-// PickupIssue moves an issue to "In Progress" (transition 441).
+// PickupIssue moves an issue to "In Progress".
 func PickupIssue(jira integration.JiraService, issueKey string) error {
-	return TransitionIssue(jira, issueKey, TransitionIDInProgress)
+	return jira.TransitionToStatus(issueKey, StatusInProgress)
 }
 
-// MoveToTestEnv moves an issue to "Testing" (transition 541, falls back to name-based lookup).
+// MoveToTestEnv moves an issue to "TEST ENV" (transition 541, falls back to name-based lookup Testing).
 func MoveToTestEnv(jira integration.JiraService, issueKey string) error {
 	if err := TransitionIssue(jira, issueKey, TransitionIDTestEnv); err == nil {
 		return nil
 	}
-	return jira.TransitionToStatus(issueKey, StatusTestEnv)
+	return jira.TransitionToStatus(issueKey, StatusTesting)
 }
 
 // MarkDone moves an issue to "Done".

@@ -128,7 +128,7 @@ func unassignCmd(jira integration.JiraService, issueKey string) tea.Cmd {
 
 func pickIssueCmd(jira integration.JiraService, issueKey string) tea.Cmd {
 	return func() tea.Msg {
-		if err := jira.TransitionByID(issueKey, actions.TransitionIDInProgress); err != nil {
+		if err := actions.PickupIssue(jira, issueKey); err != nil {
 			return errMsg{source: "board", err: err}
 		}
 		if err := jira.AssignToMe(issueKey); err != nil {
