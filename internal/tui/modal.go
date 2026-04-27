@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -115,10 +116,12 @@ func (m HelpModal) view(width, height int) string {
 
 	// --- Colour legend: left = top table, right = active bottom table (mirrors hotkey layout) ---
 	if len(m.topColorEntries) > 0 {
-		// Build per-entry lines for each column
+		// keyColStyle pads to the same 10-char slot used by keyLine's %-10s,
+		// so the label text aligns with the key-description column above.
+		keyColStyle := lipgloss.NewStyle().Width(10)
 		entryLine := func(e legendEntry) string {
 			bullet := lipgloss.NewStyle().Foreground(e.color).Render("●")
-			return "  " + bullet + "  " + e.label
+			return "  " + keyColStyle.Render(bullet) + " " + e.label
 		}
 
 		leftEntries := m.topColorEntries
@@ -482,7 +485,13 @@ func (m EditorSelectModal) view(width, _ int) string {
 func openEditorCmd(shell integration.ShellService, editor, path string) tea.Cmd {
 	switch editor {
 	case "vim":
-		return tea.ExecProcess(exec.Command(editor, path), nil)
+		// Try neovim at explicit path first, then fall back to system vim.
+		// (exec.Command doesn't resolve shell aliases, so we check the path directly)
+		vimPath := "vim"
+		if _, err := os.Stat("/opt/nvim/bin/nvim"); err == nil {
+			vimPath = "/opt/nvim/bin/nvim"
+		}
+		return tea.ExecProcess(exec.Command(vimPath, path), nil)
 	case "idea":
 		return func() tea.Msg {
 			bin, err := shell.ResolveEditorPath("idea")
@@ -894,14 +903,15 @@ func (m CommandPaletteModal) view(width, _ int) string {
 		maxW = width - 4
 	}
 
-	descStyle := lipgloss.NewStyle().Foreground(colorFg).Width(maxDescLen)
+	// Descriptions fill the interior: maxW - 4 accounts for border(2) + padding(2)
+	innerW := maxW - 4
 
 	var sb strings.Builder
 	for i, cmd := range m.commands {
 		if i == m.cursor {
-			sb.WriteString(selectedRowStyle.Width(maxDescLen).Render(cmd.Desc) + "\n")
+			sb.WriteString(selectedRowStyle.Width(innerW).Render(cmd.Desc) + "\n")
 		} else {
-			sb.WriteString(descStyle.Render(cmd.Desc) + "\n")
+			sb.WriteString(lipgloss.NewStyle().Foreground(colorFg).Width(innerW).Render(cmd.Desc) + "\n")
 		}
 	}
 	content := strings.TrimRight(sb.String(), "\n")

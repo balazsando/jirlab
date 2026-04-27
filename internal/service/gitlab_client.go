@@ -20,9 +20,9 @@ type GitLabClient interface {
 	MergeMR(projectID, mrIID int) error
 	CloseMR(projectID, mrIID int) error
 	GetCurrentUsername() (string, error)
-	// DownloadMRPatch downloads raw bytes from a URL using the configured auth token.
-	// Used to fetch the .patch file for a merge request.
-	DownloadMRPatch(patchURL string) ([]byte, error)
+	// DownloadMRPatch fetches all file diffs for a merge request and formats them
+	// as a unified diff patch file using the GitLab API /diffs endpoint.
+	DownloadMRPatch(projectID, mrIID int) ([]byte, error)
 	// ListProjectBranches returns all branches for the given GitLab project.
 	ListProjectBranches(projectID int) ([]Branch, error)
 	// ListProjectTags returns all tags for the given GitLab project, newest first.
@@ -429,25 +429,91 @@ func (c *gitLabClient) ListProjectMergeRequests(projectID int, state string) ([]
 	return result, nil
 }
 
-// DownloadMRPatch fetches raw bytes from the given URL using the configured
-// PRIVATE-TOKEN header. Intended for downloading .patch files from GitLab.
-// Note: JSON Accept/Content-Type headers are intentionally omitted so GitLab
-// serves the raw patch text instead of a JSON error.
-func (c *gitLabClient) DownloadMRPatch(patchURL string) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, patchURL, nil)
-	if err != nil {
-		return nil, err
+// mrDiffEntry represents one file's diff from the GitLab MR diffs API.
+type mrDiffEntry struct {
+	OldPath     string `json:"old_path"`
+	NewPath     string `json:"new_path"`
+	Diff        string `json:"diff"`
+	NewFile     bool   `json:"new_file"`
+	RenamedFile bool   `json:"renamed_file"`
+	DeletedFile bool   `json:"deleted_file"`
+}
+
+// DownloadMRPatch fetches all file diffs for a merge request via the GitLab
+// API /projects/:id/merge_requests/:iid/diffs endpoint (requires GitLab 15.7+)
+// and formats them as a standard unified diff suitable for git-apply.
+func (c *gitLabClient) DownloadMRPatch(projectID, mrIID int) ([]byte, error) {
+	var allDiffs []mrDiffEntry
+	for page := 1; page <= 10; page++ {
+		u := fmt.Sprintf("%s/projects/%d/merge_requests/%d/diffs?per_page=100&page=%d",
+			c.apiURL, projectID, mrIID, page)
+		req, err := c.newRequest(http.MethodGet, u, nil)
+		if err != nil {
+			return nil, err
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("download MR diffs: %w", err)
+		}
+		defer resp.Body.Close()
+		switch resp.StatusCode {
+		case http.StatusUnauthorized:
+			return nil, fmt.Errorf("MR diffs: authentication required — check your GitLab token")
+		case http.StatusForbidden:
+			return nil, fmt.Errorf("MR diffs: access denied — token lacks read_api scope")
+		}
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return nil, fmt.Errorf("MR diffs HTTP %d for project %d MR !%d", resp.StatusCode, projectID, mrIID)
+		}
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("read MR diffs: %w", err)
+		}
+		var page_diffs []mrDiffEntry
+		if err := json.Unmarshal(body, &page_diffs); err != nil {
+			return nil, fmt.Errorf("parse MR diffs: %w", err)
+		}
+		allDiffs = append(allDiffs, page_diffs...)
+		if len(page_diffs) < 100 {
+			break // last page
+		}
 	}
-	req.Header.Set("PRIVATE-TOKEN", c.token)
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("download patch failed: %w", err)
+	return formatUnifiedDiff(allDiffs), nil
+}
+
+// formatUnifiedDiff converts GitLab mrDiffEntry records into a git-apply
+// compatible unified diff.
+func formatUnifiedDiff(diffs []mrDiffEntry) []byte {
+	var sb strings.Builder
+	for _, d := range diffs {
+		switch {
+		case d.NewFile:
+			sb.WriteString("diff --git a/" + d.NewPath + " b/" + d.NewPath + "\n")
+			sb.WriteString("new file mode 100644\n")
+			sb.WriteString("--- /dev/null\n")
+			sb.WriteString("+++ b/" + d.NewPath + "\n")
+		case d.DeletedFile:
+			sb.WriteString("diff --git a/" + d.OldPath + " b/" + d.OldPath + "\n")
+			sb.WriteString("deleted file mode 100644\n")
+			sb.WriteString("--- a/" + d.OldPath + "\n")
+			sb.WriteString("+++ /dev/null\n")
+		case d.RenamedFile:
+			sb.WriteString("diff --git a/" + d.OldPath + " b/" + d.NewPath + "\n")
+			sb.WriteString("rename from " + d.OldPath + "\n")
+			sb.WriteString("rename to " + d.NewPath + "\n")
+			sb.WriteString("--- a/" + d.OldPath + "\n")
+			sb.WriteString("+++ b/" + d.NewPath + "\n")
+		default:
+			sb.WriteString("diff --git a/" + d.OldPath + " b/" + d.NewPath + "\n")
+			sb.WriteString("--- a/" + d.OldPath + "\n")
+			sb.WriteString("+++ b/" + d.NewPath + "\n")
+		}
+		sb.WriteString(d.Diff)
+		if len(d.Diff) > 0 && d.Diff[len(d.Diff)-1] != '\n' {
+			sb.WriteByte('\n')
+		}
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("patch download HTTP %d for %s", resp.StatusCode, patchURL)
-	}
-	return io.ReadAll(resp.Body)
+	return []byte(sb.String())
 }
 
 // --- ListProjectBranches ---

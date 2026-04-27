@@ -78,10 +78,23 @@ var MRsKeys = []HelpEntry{
 var TrackerKeys = []HelpEntry{
 	{"↑/k", "up"},
 	{"↓/j", "down"},
+	{"tab", "switch pane (worklogs/notes)"},
 	{"l", "log full day (8-16)"},
 	{"h", "log half day (8-12)"},
 	{"←/→", "prev/next day"},
 	{"w", "open timetracker in browser"},
+}
+
+// TrackerNotesKeys are the hotkeys for the Time Tracker — Notes pane.
+var TrackerNotesKeys = []HelpEntry{
+	{"↑/k", "up"},
+	{"↓/j", "down"},
+	{"tab", "switch to worklogs"},
+	{"n", "new note"},
+	{"enter", "open note"},
+	{"d", "delete note"},
+	{"s", "cycle sort"},
+	{"f", "cycle category filter"},
 }
 
 // KubeKeys are the hotkeys available in the Kubernetes section.
@@ -96,6 +109,7 @@ var KubeKeys = []HelpEntry{
 	{"o", "pods tab"},
 	{"e", "services tab"},
 	{"m", "deployments tab"},
+	{"x", "exec shell (pods tab)"},
 	{"l", "pod logs (only in pods tab)"},
 	{"r", "scale replicas (deployments)"},
 	{"d", "describe resource"},
@@ -120,6 +134,9 @@ var ReposMainKeys = []HelpEntry{
 	{"t", "tags subtab"},
 	{"m", "merge requests subtab"},
 	{"p", "pipelines subtab"},
+	{"o", "open in editor"},
+	{"w", "open URL in browser"},
+	{"v", "copy version to clipboard"},
 }
 
 // ReposBranchesKeys is the key set for the Repositories — Branches subtab.
@@ -201,6 +218,7 @@ var KubePodsKeys = []HelpEntry{
 	{"↓/j", "down"},
 	{"tab", "switch pane"},
 	{"→", "command palette"},
+	{"x", "exec shell"},
 	{"l", "view logs"},
 	{"d", "describe pod"},
 	{"y", "get YAML"},

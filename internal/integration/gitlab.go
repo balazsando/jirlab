@@ -39,8 +39,9 @@ type GitLabService interface {
 	GetProjectPipelines(projectID int, repoName string, statuses []string) ([]service.Pipeline, error)
 	// CreateMR opens a new merge request on the given project.
 	CreateMR(projectID int, sourceBranch, targetBranch, title string) (*service.MergeRequest, error)
-	// DownloadMRPatch fetches raw .patch bytes from the given URL.
-	DownloadMRPatch(patchURL string) ([]byte, error)
+	// DownloadMRPatch fetches the raw .patch bytes for a merge request via the
+	// GitLab API. Returns clear errors for 401/403 auth failures.
+	DownloadMRPatch(projectID, mrIID int) ([]byte, error)
 	// GetCIVariables parses the resolved CI config for variables with a description field.
 	GetCIVariables(projectID int, ref string) ([]service.PipelineVariable, error)
 	// TriggerPipeline creates a new pipeline run on the given project/ref.
@@ -208,8 +209,8 @@ func (s *gitLabService) CreateMR(projectID int, sourceBranch, targetBranch, titl
 	return s.client.CreateMR(projectID, sourceBranch, targetBranch, title)
 }
 
-func (s *gitLabService) DownloadMRPatch(patchURL string) ([]byte, error) {
-	return s.client.DownloadMRPatch(patchURL)
+func (s *gitLabService) DownloadMRPatch(projectID, mrIID int) ([]byte, error) {
+	return s.client.DownloadMRPatch(projectID, mrIID)
 }
 
 // GetCIVariables calls the CI lint endpoint (which resolves all !include directives)
