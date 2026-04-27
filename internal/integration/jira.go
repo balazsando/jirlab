@@ -126,7 +126,7 @@ func (s *jiraService) GetAllSprintIssues(boardID string) ([]service.Issue, error
 // statusSortOrder assigns a numeric rank to a Jira status for sorting.
 func statusSortOrder(status string) int {
 	switch status {
-	case "Backlog", "Open", "On Hold":
+	case "In Backlog", "Backlog", "Open", "On Hold":
 		return 0
 	case "Prio 1", "To Dev", "To Do":
 		return 1

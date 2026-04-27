@@ -368,3 +368,17 @@ func TimeLogColorLegendBar(width int) string { return buildLegendBar(timeLogColo
 
 // TimeLogColorLegendLines returns per-entry lines for modal display.
 func TimeLogColorLegendLines() []string { return legendLines(timeLogColorEntries) }
+
+// --- Notes priority ---
+
+var notePriorityColorEntries = []legendEntry{
+	{colorRed, "High priority"},
+	{colorYellow, "Med priority"},
+	{colorGreen, "Low priority"},
+}
+
+// NotePriorityLegendBar returns a single-line colour legend for the notes footer.
+func NotePriorityLegendBar(width int) string { return buildLegendBar(notePriorityColorEntries, width) }
+
+// NotePriorityLegendLines returns per-entry lines for modal display.
+func NotePriorityLegendLines() []string { return legendLines(notePriorityColorEntries) }

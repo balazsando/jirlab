@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -496,6 +497,22 @@ func (s KubeSection) handleKey(msg tea.KeyMsg) (KubeSection, tea.Cmd) {
 		}
 		// no longer switches to deployments tab
 
+	case "x":
+		// x = exec interactive shell in selected pod
+		if s.activePane == kubePanePods && len(s.pods) > 0 && s.podCursor < len(s.pods) {
+			pod := s.pods[s.podCursor].Name
+			cfg := s.activeConfig
+			cmd := exec.Command("kubectl", "exec", "-it", pod, "--", "/bin/sh") //nolint:gosec
+			cmd.Env = append(os.Environ(), "KUBECONFIG="+cfg)
+			return s, tea.ExecProcess(cmd, func(err error) tea.Msg {
+				if err != nil {
+					// exit code 1 from /bin/sh is normal (e.g. user typed `exit 1`)
+					return nil
+				}
+				return nil
+			})
+		}
+
 	case "m":
 		// m = switch to Deployments tab
 		s.lastResourcePane = kubePaneDeployments
@@ -626,8 +643,15 @@ func (s KubeSection) buildCommandPalette() []CommandEntry {
 			return nil
 		}
 		pod := s.pods[s.podCursor].Name
+		cfg := s.activeConfig
+		execCmd := func() tea.Msg {
+			cmd := exec.Command("kubectl", "exec", "-it", pod, "--", "/bin/sh") //nolint:gosec
+			cmd.Env = append(os.Environ(), "KUBECONFIG="+cfg)
+			return tea.ExecProcess(cmd, func(_ error) tea.Msg { return nil })()
+		}
 		return []CommandEntry{
 			{Key: "l", Desc: "logs", Cmd: kubeCmdOutputCmd(kubectl, "Logs: "+pod, cfg, "logs", pod, "--tail=200")},
+			{Key: "x", Desc: "exec shell", Cmd: execCmd},
 			{Key: "d", Desc: "describe", Cmd: kubeCmdOutputCmd(kubectl, "Describe pod: "+pod, cfg, "describe", "pod", pod)},
 			{Key: "y", Desc: "yaml", Cmd: kubeCmdOutputCmd(kubectl, "YAML: "+pod, cfg, "get", "pod", pod, "-o", "yaml")},
 		}

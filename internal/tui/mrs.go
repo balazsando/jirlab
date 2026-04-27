@@ -519,7 +519,7 @@ func downloadMRPatchCmd(gitlab integration.GitLabService, fs integration.Filesys
 			return errMsg{source: "mrs", err: fmt.Errorf("no local repo for project %d — checkout the repo first", mr.ProjectID)}
 		}
 
-		data, err := gitlab.DownloadMRPatch(mr.WebURL + ".patch")
+		data, err := gitlab.DownloadMRPatch(mr.ProjectID, mr.IID)
 		if err != nil {
 			return errMsg{source: "mrs", err: fmt.Errorf("download patch: %w", err)}
 		}

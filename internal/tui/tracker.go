@@ -57,6 +57,17 @@ func trackerLogWorkCmd(jira integration.JiraService, issueKey string, fromH, fro
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Tracker sub-pane enum
+// ---------------------------------------------------------------------------
+
+type trackerPane int
+
+const (
+	trackerPaneWorklogs trackerPane = iota
+	trackerPaneNotes
+)
+
 // TrackerSection is the Time Tracker tab.
 type TrackerSection struct {
 	logs        []service.TimeLog
@@ -68,17 +79,41 @@ type TrackerSection struct {
 	jira        integration.JiraService
 	accountID   string
 	shell       integration.ShellService
+
+	// Notes sub-pane
+	activePane    trackerPane
+	notes         []note
+	notesFiltered []note // sorted+filtered view
+	notesCursor   int
+	notesSort     notesSortMode
+	notesFilter   string // "" = all categories
+	notesPath     string
 }
 
 func newTrackerSection(jira integration.JiraService, accountID string, shell integration.ShellService) TrackerSection {
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	return TrackerSection{
+	path := notesFilePath()
+	notes := loadNotes(path)
+	s := TrackerSection{
 		currentDate: today,
 		loading:     jira != nil,
 		jira:        jira,
 		accountID:   accountID,
 		shell:       shell,
+		notes:       notes,
+		notesPath:   path,
+	}
+	s.rebuildNotesView()
+	return s
+}
+
+// rebuildNotesView applies sort + filter to produce s.notesFiltered.
+func (s *TrackerSection) rebuildNotesView() {
+	filtered := filterNotes(s.notes, s.notesFilter)
+	s.notesFiltered = sortNotes(filtered, s.notesSort)
+	if s.notesCursor >= len(s.notesFiltered) {
+		s.notesCursor = max(0, len(s.notesFiltered)-1)
 	}
 }
 
@@ -121,13 +156,53 @@ func (s TrackerSection) update(msg tea.Msg) (TrackerSection, tea.Cmd) {
 			return s, fetchWorklogsCmd(s.jira, s.accountID, s.currentDate)
 		}
 
+	case notesSavedMsg:
+		// no-op: save is fire-and-forget
+
+	case notesUpdatedMsg:
+		s.notes = msg.notes
+		s.rebuildNotesView()
+
+	case noteDeleteMsg:
+		s.notes = deleteNote(s.notes, msg.noteIdx)
+		s.rebuildNotesView()
+		return s, saveNotesCmd(s.notesPath, s.notes)
+
 	case tea.KeyMsg:
 		return s.handleKey(msg)
 	}
 	return s, nil
 }
 
+// deleteNote removes the note at originalIdx from the slice.
+func deleteNote(notes []note, originalIdx int) []note {
+	if originalIdx < 0 || originalIdx >= len(notes) {
+		return notes
+	}
+	out := make([]note, 0, len(notes)-1)
+	out = append(out, notes[:originalIdx]...)
+	out = append(out, notes[originalIdx+1:]...)
+	return out
+}
+
 func (s TrackerSection) handleKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
+	// tab switches between worklogs and notes
+	if msg.String() == "tab" {
+		if s.activePane == trackerPaneWorklogs {
+			s.activePane = trackerPaneNotes
+		} else {
+			s.activePane = trackerPaneWorklogs
+		}
+		return s, nil
+	}
+
+	if s.activePane == trackerPaneNotes {
+		return s.handleNotesKey(msg)
+	}
+	return s.handleWorklogsKey(msg)
+}
+
+func (s TrackerSection) handleWorklogsKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
 	n := len(s.logs)
 	switch msg.String() {
 	case "j", "down":
@@ -192,7 +267,164 @@ func (s TrackerSection) handleKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
 	return s, nil
 }
 
+func (s TrackerSection) handleNotesKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		if s.notesCursor < len(s.notesFiltered)-1 {
+			s.notesCursor++
+		}
+	case "k", "up":
+		if s.notesCursor > 0 {
+			s.notesCursor--
+		}
+
+	case "n": // new note
+		cats := uniqueCategories(s.notes)
+		currentNotes := s.notes
+		return s, func() tea.Msg {
+			return OpenModalMsg{M: NewNoteCreateModal(cats, func(newNote note) tea.Cmd {
+				return func() tea.Msg {
+					return notesUpdatedMsg{notes: append(currentNotes, newNote)}
+				}
+			})}
+		}
+
+	case "enter": // open note detail
+		if len(s.notesFiltered) == 0 || s.notesCursor >= len(s.notesFiltered) {
+			break
+		}
+		sel := s.notesFiltered[s.notesCursor]
+		// find original index in s.notes
+		origIdx := -1
+		for i, n := range s.notes {
+			if n.ID == sel.ID {
+				origIdx = i
+				break
+			}
+		}
+		if origIdx < 0 {
+			break
+		}
+		notesSlice := s.notes
+		return s, func() tea.Msg {
+			return OpenModalMsg{M: NewNoteDetailModal(origIdx, sel, func(updated note) tea.Cmd {
+				return func() tea.Msg {
+					newNotes := make([]note, len(notesSlice))
+					copy(newNotes, notesSlice)
+					newNotes[origIdx] = updated
+					return notesUpdatedMsg{notes: newNotes}
+				}
+			})}
+		}
+
+	case "s": // cycle sort
+		s.notesSort = (s.notesSort + 1) % 3
+		s.rebuildNotesView()
+
+	case "f": // cycle category filter
+		cats := uniqueCategories(s.notes)
+		if len(cats) == 0 {
+			break
+		}
+		if s.notesFilter == "" {
+			s.notesFilter = cats[0]
+		} else {
+			found := false
+			for i, c := range cats {
+				if c == s.notesFilter {
+					if i+1 < len(cats) {
+						s.notesFilter = cats[i+1]
+					} else {
+						s.notesFilter = "" // back to all
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				s.notesFilter = ""
+			}
+		}
+		s.notesCursor = 0
+		s.rebuildNotesView()
+
+	case "d": // delete selected note
+		if len(s.notesFiltered) == 0 || s.notesCursor >= len(s.notesFiltered) {
+			break
+		}
+		sel := s.notesFiltered[s.notesCursor]
+		origIdx := -1
+		for i, n := range s.notes {
+			if n.ID == sel.ID {
+				origIdx = i
+				break
+			}
+		}
+		if origIdx < 0 {
+			break
+		}
+		noteTitle := sel.Title
+		notesSlice := s.notes
+		return s, func() tea.Msg {
+			return OpenModalMsg{M: ConfirmModal{
+				message: fmt.Sprintf("Delete note: %s?", truncStr(noteTitle, 40)),
+				onConfirm: func() tea.Msg {
+					newNotes := deleteNote(notesSlice, origIdx)
+					return notesUpdatedMsg{notes: newNotes}
+				},
+			}}
+		}
+	}
+	return s, nil
+}
+
 func (s TrackerSection) view(width, height int) string {
+	// Vertical split: worklogs top, notes bottom.
+	// Overhead: sep(1) + paneBar(1) + paneSep(1) = 3 rows between sections.
+	topH := height * 55 / 100
+	if topH < 4 {
+		topH = 4
+	}
+	botH := height - topH - 3
+	if botH < 5 {
+		botH = 5
+	}
+
+	worklogsFocused := s.activePane == trackerPaneWorklogs
+	notesFocused := s.activePane == trackerPaneNotes
+
+	top := s.viewWorklogs(width, topH, worklogsFocused)
+	sep := sectionSepLine(width)
+	paneBar := s.viewNotesPaneBar(width, notesFocused)
+	paneSep := sectionSepLine(width)
+	bot := s.viewNotes(width, botH, notesFocused)
+
+	return strings.Join([]string{top, sep, paneBar, paneSep, bot}, "\n")
+}
+
+// viewNotesPaneBar renders the Notes sub-section tab bar, matching the design of
+// the Pods/Services/Deployments and Branches/Tags pane bars in other sections.
+func (s TrackerSection) viewNotesPaneBar(width int, focused bool) string {
+	label := s.notesHeader()
+	if focused {
+		return tabActiveStyle.Render(label)
+	}
+	return tabDimStyle.Render(label)
+}
+
+// notesHeader builds the Notes section label including count, filter, and sort info.
+func (s TrackerSection) notesHeader() string {
+	label := fmt.Sprintf("Notes (%d)", len(s.notes))
+	if s.notesFilter != "" {
+		label += " [" + s.notesFilter + "]"
+	}
+	if s.notesSort != notesSortDate {
+		label += " [" + s.notesSort.Label() + "]"
+	}
+	return label
+}
+
+func (s TrackerSection) viewWorklogs(width, height int, focused bool) string {
 	hoursStyle := lipgloss.NewStyle().Bold(true)
 	if s.totalHours >= 8 {
 		hoursStyle = hoursStyle.Foreground(colorGreen)
@@ -202,7 +434,12 @@ func (s TrackerSection) view(width, height int) string {
 		hoursStyle = hoursStyle.Foreground(colorRed)
 	}
 
-	nav := lipgloss.NewStyle().Foreground(colorSubtle).Render("  ← prev  → next  r: refresh  w: timetracker")
+	selRow := selectedRowDimStyle
+	if focused {
+		selRow = selectedRowStyle
+	}
+
+	nav := lipgloss.NewStyle().Foreground(colorSubtle).Render("  ← prev  → next  w: timetracker")
 
 	if s.loading && len(s.logs) == 0 {
 		header := lipgloss.NewStyle().Bold(true).Padding(0, 2).Render(s.dayLabel())
@@ -216,8 +453,8 @@ func (s TrackerSection) view(width, height int) string {
 	header := summary + "   " + nav
 
 	if len(s.logs) == 0 {
-		note := lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 2).Render("No time logged for this day.")
-		return header + "\n\n" + note
+		noData := lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 2).Render("No time logged for this day.")
+		return header + "\n\n" + noData
 	}
 
 	timeW := 13 // "09:00-11:30 "
@@ -236,7 +473,7 @@ func (s TrackerSection) view(width, height int) string {
 		colHeader("SUMMARY", summaryW) + " " + colHeader("COMMENT", commentW)
 	sepLine := lipgloss.NewStyle().Foreground(colorBorder).Render(strings.Repeat("-", width))
 
-	maxRows := height - 8
+	maxRows := height - 7
 	if maxRows < 1 {
 		maxRows = 1
 	}
@@ -253,19 +490,19 @@ func (s TrackerSection) view(width, height int) string {
 	lines = append(lines, header, "", tableHeader, sepLine)
 
 	for i := start; i < end; i++ {
-		log := s.logs[i]
+		entry := s.logs[i]
 		fromTo := fmt.Sprintf("%s-%s",
-			log.From.Format("15:04"),
-			log.To.Format("15:04"),
+			entry.From.Format("15:04"),
+			entry.To.Format("15:04"),
 		)
 		row := fmt.Sprintf("%-*s %-*s %-*s %-*s",
 			timeW, truncStr(fromTo, timeW),
-			issueW, truncStr(log.IssueKey, issueW),
-			summaryW, truncStr(log.Description, summaryW),
-			commentW, truncStr(log.Comment, commentW),
+			issueW, truncStr(entry.IssueKey, issueW),
+			summaryW, truncStr(entry.Description, summaryW),
+			commentW, truncStr(entry.Comment, commentW),
 		)
 		if i == s.cursor {
-			lines = append(lines, selectedRowStyle.Width(width).Render(row))
+			lines = append(lines, selRow.Width(width).Render(row))
 		} else {
 			lines = append(lines, normalRowStyle.Width(width).Render(row))
 		}
@@ -274,11 +511,76 @@ func (s TrackerSection) view(width, height int) string {
 	result := strings.Join(lines, "\n")
 	result += "\n" + tableHeaderSepLine(width)
 	result += "\n" + TimeLogColorLegendBar(width)
-	result += "\n" + lipgloss.NewStyle().Foreground(colorMuted).Render("  l: log full day  h: log half day  ←/→: prev/next day  w: timetracker")
+	result += "\n" + lipgloss.NewStyle().Foreground(colorSubtle).Render("  l: log full day  h: log half day  ←/→: prev/next day  w: timetracker  tab: notes")
 	if s.statusMsg != "" {
 		result += "\n" + lipgloss.NewStyle().Foreground(colorGreen).Render("  "+s.statusMsg)
 	}
 	return result
 }
 
-func (s TrackerSection) helpKeys() []HelpEntry { return TrackerKeys }
+func (s TrackerSection) viewNotes(width, height int, focused bool) string {
+	selRow := selectedRowDimStyle
+	if focused {
+		selRow = selectedRowStyle
+	}
+
+	if len(s.notesFiltered) == 0 {
+		empty := lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 2).Render("No notes. Press n to create one.")
+		return empty
+	}
+
+	titleW := width / 3
+	catW := 14
+	prioW := 6
+	tasksW := 8
+	dateW := 12
+	if titleW+catW+prioW+tasksW+dateW+8 > width {
+		titleW = width - catW - prioW - tasksW - dateW - 8
+	}
+	if titleW < 12 {
+		titleW = 12
+	}
+
+	colH := func(s string, w int) string { return columnHeaderStyle.Width(w).Render(truncStr(s, w)) }
+	tableHeader := colH("TITLE", titleW) + " " + colH("CATEGORY", catW) + " " +
+		colH("PRIO", prioW) + " " + colH("TASKS", tasksW) + " " + colH("CREATED", dateW)
+
+	// rows = total height minus: col header + table sep + legend + hints
+	maxRows := height - 4
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	start, end := scrollWindow(s.notesCursor, len(s.notesFiltered), maxRows)
+
+	var rows []string
+	rows = append(rows, tableHeader, tableHeaderSepLine(width))
+	for i := start; i < end; i++ {
+		nn := s.notesFiltered[i]
+		line := fmt.Sprintf("%-*s %-*s %-*s %-*s %-*s",
+			titleW, truncStr(nn.Title, titleW),
+			catW, truncStr(nn.Category, catW),
+			prioW, truncStr(nn.Priority.String(), prioW),
+			tasksW, truncStr(nn.taskSummary(), tasksW),
+			dateW, truncStr(nn.CreatedAt.Format("2006-01-02"), dateW),
+		)
+		col := nn.Priority.Color()
+		if i == s.notesCursor {
+			rows = append(rows, selRow.Foreground(col).Width(width).Render(line))
+		} else {
+			rows = append(rows, normalRowStyle.Foreground(col).Width(width).Render(line))
+		}
+	}
+	rows = append(rows, tableHeaderSepLine(width))
+	rows = append(rows, NotePriorityLegendBar(width))
+	rows = append(rows, lipgloss.NewStyle().Foreground(colorSubtle).Render(
+		"  n: new  enter: open  d: delete  s: sort  f: filter  tab: worklogs",
+	))
+	return strings.Join(rows, "\n")
+}
+
+func (s TrackerSection) helpKeys() []HelpEntry {
+	if s.activePane == trackerPaneNotes {
+		return TrackerNotesKeys
+	}
+	return TrackerKeys
+}

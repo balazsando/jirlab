@@ -128,7 +128,7 @@ func unassignCmd(jira integration.JiraService, issueKey string) tea.Cmd {
 
 func pickIssueCmd(jira integration.JiraService, issueKey string) tea.Cmd {
 	return func() tea.Msg {
-		if err := jira.TransitionByID(issueKey, actions.TransitionIDInProgress); err != nil {
+		if err := actions.PickupIssue(jira, issueKey); err != nil {
 			return errMsg{source: "board", err: err}
 		}
 		if err := jira.AssignToMe(issueKey); err != nil {
@@ -213,7 +213,7 @@ func isBoardFilterMatch(iss service.Issue) bool {
 		return false
 	}
 	switch iss.Status {
-	case "Prio 1", "To Dev", "To Do", "In Progress", "Review", "Bug":
+	case "Prio 1", "To Dev", "To Do", "In Progress", "Review", "Bug", "In Backlog":
 		return true
 	case "Backlog":
 		return backlogTypes[iss.IssueType]
@@ -525,6 +525,7 @@ func (s BoardSection) buildCommandPalette(issue service.Issue) []CommandEntry {
 
 // statusGroup maps a Jira status name to its display group.
 var statusGroup = map[string]string{
+	"In Backlog":  "Analysis",
 	"Backlog":     "Analysis",
 	"Open":        "Analysis",
 	"On Hold":     "Analysis",

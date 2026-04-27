@@ -18,7 +18,8 @@ type mockGitLabClient struct {
 	createMRSource     string
 	createMRTarget     string
 	createMRTitle      string
-	downloadPatchURL   string
+	downloadPatchProjectID int
+	downloadPatchMRIID     int
 	listJobsProjectID  int
 	listJobsPipelineID int
 
@@ -60,8 +61,9 @@ func (m *mockGitLabClient) CreateMR(projectID int, sourceBranch, targetBranch, t
 	return m.createMRResult, m.createMRErr
 }
 
-func (m *mockGitLabClient) DownloadMRPatch(patchURL string) ([]byte, error) {
-	m.downloadPatchURL = patchURL
+func (m *mockGitLabClient) DownloadMRPatch(projectID, mrIID int) ([]byte, error) {
+	m.downloadPatchProjectID = projectID
+	m.downloadPatchMRIID = mrIID
 	return m.downloadPatchBytes, m.downloadPatchErr
 }
 
@@ -120,15 +122,18 @@ func TestDownloadMRPatchDelegates(t *testing.T) {
 	mock := &mockGitLabClient{downloadPatchBytes: want}
 	svc := NewGitLabService(mock)
 
-	got, err := svc.DownloadMRPatch("https://gitlab.example.com/patch.patch")
+	got, err := svc.DownloadMRPatch(99, 7)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if string(got) != string(want) {
 		t.Errorf("patch bytes: want %q, got %q", want, got)
 	}
-	if mock.downloadPatchURL != "https://gitlab.example.com/patch.patch" {
-		t.Errorf("patchURL: want %q, got %q", "https://gitlab.example.com/patch.patch", mock.downloadPatchURL)
+	if mock.downloadPatchProjectID != 99 {
+		t.Errorf("projectID: want 99, got %d", mock.downloadPatchProjectID)
+	}
+	if mock.downloadPatchMRIID != 7 {
+		t.Errorf("mrIID: want 7, got %d", mock.downloadPatchMRIID)
 	}
 }
 

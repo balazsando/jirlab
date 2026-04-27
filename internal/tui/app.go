@@ -421,6 +421,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	// Notes messages — always routed to tracker regardless of active tab
+	if nu, ok := msg.(notesUpdatedMsg); ok {
+		var cmd tea.Cmd
+		m.tracker, cmd = m.tracker.update(nu)
+		return m, cmd
+	}
+	if nd, ok := msg.(noteDeleteMsg); ok {
+		var cmd tea.Cmd
+		m.tracker, cmd = m.tracker.update(nd)
+		return m, cmd
+	}
+
 	// myAccountIDMsg — set board.myUserKey from /3/myself
 	if mam, ok := msg.(myAccountIDMsg); ok {
 		m.board.myUserKey = mam.id
@@ -597,6 +609,8 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case TabTracker:
 					hm.topColorEntries = timeLogColorEntries
 					hm.topColorLabel = "Colours — time logged"
+					hm.bottomColorEntries = notePriorityColorEntries
+					hm.bottomColorLabel = "Colours — note priority"
 				}
 				m.activeModal = hm
 			}
@@ -659,6 +673,9 @@ func (m AppModel) activeSectionKeys() []HelpEntry {
 			return KubeConfigsKeys
 		}
 	case TabTracker:
+		if m.tracker.activePane == trackerPaneNotes {
+			return TrackerNotesKeys
+		}
 		return TrackerKeys
 	}
 	return nil
@@ -698,6 +715,9 @@ func (m AppModel) activeSectionName() string {
 		}
 		return "Kubernetes \u2014 Configs"
 	case TabTracker:
+		if m.tracker.activePane == trackerPaneNotes {
+			return "Time Tracker \u2014 Notes"
+		}
 		return "Time Tracker"
 	}
 	return tabLabels[m.activeTab]

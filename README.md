@@ -14,8 +14,11 @@ A terminal UI for Jira sprint boards, GitLab merge requests, Kubernetes workload
    - [Merge Requests (3)](#merge-requests-3)
    - [Kubernetes (4)](#kubernetes-4)
    - [Time Tracker (5)](#time-tracker-5)
-3. [CLI Reference](#cli-reference)
-4. [Further Reading](#further-reading)
+     - [Worklogs panel](#worklogs-panel)
+     - [Notes panel](#notes-panel)
+3. [Theming](#theming)
+4. [CLI Reference](#cli-reference)
+5. [Further Reading](#further-reading)
 
 ---
 
@@ -152,6 +155,7 @@ After saving, reload: `source ~/.zshrc`
 | Key | Action |
 |-----|--------|
 | `1` – `5` | Switch between tabs |
+| `0` | Refresh tables |
 | `?` | Open keyboard help (section-specific hotkeys + colour legend) |
 | `esc` | Close modal / dismiss error |
 | `q` | Quit |
@@ -268,11 +272,16 @@ Shows all open MRs across your local repos (both created by you and assigned to 
 |-----|--------|
 | `↑` / `k`, `↓` / `j` | Navigate MRs |
 | `enter` / `w` | Open MR in browser |
-| `p` | Download patch file to `~/patches/` |
+| `p` | Download MR diff patch (saved to `{repo}/.mr/{issue}.patch`) |
 | `c` | Checkout MR branch locally |
 | `m` | Merge MR (with confirm) |
 | `d` | Close MR (with confirm) |
 | `→` | Open command palette with all available actions |
+
+**MR diff patch** (`p` key) fetches all changed files from the GitLab API
+(`GET /api/v4/projects/:id/merge_requests/:iid/diffs`) and saves a
+`git apply`-compatible unified diff to `{local_repo}/.mr/{issue}.patch`.
+Requires GitLab 15.7+. Needs `read_api` token scope.
 
 ---
 
@@ -308,10 +317,15 @@ Two-pane view: **top pane** lists kubeconfig files; **bottom pane** shows pods, 
 | `o` | Switch to Pods tab |
 | `e` | Switch to Services tab |
 | `l` | View pod logs (only in Pods tab) |
+| `x` | **Exec interactive shell** inside selected pod (Pods tab only) |
 | `m` | Switch to Deployments tab |
 | `r` | Scale replicas (on Deployments pane) / refresh (anywhere else) |
 | `d` | Describe selected resource |
 | `y` | Get resource YAML |
+
+> **Pod exec (`x`)**: suspends the TUI and opens `kubectl exec -it <pod> -- /bin/sh`
+> directly in the terminal (TTY + stdin/stdout + resize), identical to the k9s UX.
+> Exit the shell normally (`exit` or `ctrl+d`) to return to jirlab.
 
 **Pod status colours**
 
@@ -325,17 +339,15 @@ Two-pane view: **top pane** lists kubeconfig files; **bottom pane** shows pods, 
 
 ### Time Tracker `5`
 
-Shows Jira time logs for the selected day. Navigate between days with the arrow keys.
+Two-panel view: **top panel** shows Jira worklogs for the selected day; **bottom panel** is the Notes manager. Press `tab` to move keyboard focus between panels.
 
-**Colour legend** (total hours logged for the day)
+**Worklogs panel**
 
 | Colour | Meaning |
 |--------|---------|
 | Red | 0 h logged |
 | Yellow | > 0 h and < 8 h |
 | Green | ≥ 8 h |
-
-**Hotkeys**
 
 | Key | Action |
 |-----|--------|
@@ -344,7 +356,61 @@ Shows Jira time logs for the selected day. Navigate between days with the arrow 
 | `l` | Log full day (08:00–16:00) |
 | `h` | Log half day (08:00–12:00) |
 | `w` | Open Jira time tracker in browser |
-| `r` | Refresh |
+| `tab` | Move focus to Notes panel |
+
+**Notes panel**
+
+A persistent note manager stored in `~/.jirlab/notes.json`.
+
+| Colour | Meaning |
+|--------|---------|
+| Red | High-priority note |
+| Yellow | Medium-priority note |
+| Green | Low-priority note |
+
+| Key | Action |
+|-----|--------|
+| `↑` / `k`, `↓` / `j` | Navigate notes |
+| `n` | Create new note (modal with tab-switching fields) |
+| `enter` | Open note detail / toggle tasks |
+| `d` | Delete selected note (with confirm) |
+| `s` | Cycle sort: date → priority → remaining tasks |
+| `f` | Cycle category filter (cycles through all categories, then back to "all") |
+| `tab` | Move focus back to Worklogs panel |
+
+**Creating a note** — the create modal (`n`) has five tab-switchable fields:
+- **Title** (required)
+- **Category** — type freely or reuse an existing one shown as a hint
+- **Priority** — `←` / `→` to cycle Low / Med / High
+- **Description** — free-form reminder text
+- **Tasks** — `enter` adds each task; `ctrl+d` removes the last one
+
+When all tasks in a note are completed, jirlab prompts: **Keep** (`k`) or **Delete** (`d`).
+
+The active filter and sort mode are shown in the panel header:  
+`── Notes (5) [work] [priority] ──────`
+
+---
+
+## Theming
+
+jirlab ships with a **Catppuccin Mocha** colour palette baked in. All foreground and
+background colours are taken from the official Mocha palette, making it harmonise
+naturally with any Catppuccin-themed terminal emulator, shell prompt, or editor.
+
+| Element | Colour |
+|---------|--------|
+| Active tab / borders | Mauve `#cba6f7` |
+| Focused selection row | Dark mauve `#3d2452` |
+| Unfocused selection row | Surface0 `#313244` |
+| Column headers | Blue `#89b4fa` |
+| Status bar / footer | Subtext1 `#bac2de` on Surface0 |
+| Error / high priority | Red `#f38ba8` |
+| Warning / medium priority | Yellow `#f9e2af` |
+| Success / low priority | Green `#a6e3a1` |
+| New MR comment (24 h) | Pink `#f5c2e7` |
+
+No runtime configuration is needed — the theme is compiled in.
 
 ---
 
