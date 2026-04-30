@@ -14,7 +14,7 @@ var boardCmd = &cobra.Command{
 	Use:   "board",
 	Short: "Open the interactive Jira board TUI",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		model := tui.NewAppModel(jiraSvc, gitlabSvc, gitlabClient, cfg.JiraBoardID, cfg.JiraMyAccountID, cfg.GitLabAPIURL, cfg.JiraURL, debugMode)
+		model := tui.NewAppModel(jiraSvc, gitlabSvc, gitlabClient, cfg.JiraBoardID, cfg.JiraMyAccountID, cfg.GitLabAPIURL, cfg.JiraURL, cfg.AzureClientID, debugMode)
 
 		p := tea.NewProgram(
 			model,

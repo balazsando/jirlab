@@ -22,7 +22,7 @@ const (
 	TabRepos   Tab = 1
 	TabMRs     Tab = 2
 	TabKube    Tab = 3
-	TabTracker Tab = 4
+	TabChats   Tab = 4
 )
 
 var tabLabels = [5]string{
@@ -30,7 +30,7 @@ var tabLabels = [5]string{
 	"[2] Repositories",
 	"[3] Merge Requests",
 	"[4] Kubernetes",
-	"[5] Time Tracker",
+	"[5] Chats",
 }
 
 // switchTabMsg is sent internally to switch the active tab.
@@ -62,7 +62,8 @@ type AppModel struct {
 	repos   ReposSection
 	mrs     MRsSection
 	kube    KubeSection
-	tracker TrackerSection
+	tracker TrackerSection // holds worklog state for Board's l key
+	chats   ChatsSection
 
 	activeModal modal
 
@@ -83,6 +84,7 @@ type AppModel struct {
 	gitlab       integration.GitLabService
 	gitlabClient service.GitLabClient
 	gitlabAPIURL string
+	shell        integration.ShellService
 }
 
 // NewAppModel creates the root model.
@@ -91,9 +93,14 @@ func NewAppModel(
 	gitlab integration.GitLabService,
 	gitlabClient service.GitLabClient,
 	boardID, myUserKey, gitlabAPIURL, jiraBaseURL string,
+	azureClientID string,
 	debugMode bool,
 ) AppModel {
 	shell := integration.NewShellService()
+	var msgraph integration.MSGraphService
+	if azureClientID != "" {
+		msgraph = integration.NewMSGraphClient(azureClientID)
+	}
 	return AppModel{
 		activeTab:    TabBoard,
 		board:        newBoardSection(jira, gitlab, integration.NewGitCmdService(), shell, boardID, myUserKey, jiraBaseURL),
@@ -101,11 +108,13 @@ func NewAppModel(
 		mrs:          newMRsSection(gitlab, integration.NewGitCmdService(), integration.NewFilesystemService(), shell),
 		kube:         newKubeSection(integration.NewKubectlService()),
 		tracker:      newTrackerSection(jira, myUserKey, shell),
+		chats:        NewChatsSection(msgraph, shell),
 		jira:         jira,
 		gitlab:       gitlab,
 		gitlabClient: gitlabClient,
 		gitlabAPIURL: gitlabAPIURL,
 		debug:        debugMode,
+		shell:        shell,
 	}
 }
 
@@ -127,6 +136,9 @@ func (m AppModel) Init() tea.Cmd {
 	}
 	if m.jira != nil {
 		cmds = append(cmds, fetchMyAccountIDCmd(m.board.jira))
+	}
+	if cmd := m.chats.Init(); cmd != nil {
+		cmds = append(cmds, cmd)
 	}
 	return tea.Batch(cmds...)
 }
@@ -198,6 +210,10 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if em, ok := msg.(errMsg); ok {
 		m.errorMsg = fmt.Sprintf("[%s] %s", em.source, em.err.Error())
 		debug.Log("error from %s: %v", em.source, em.err)
+		// Auto-copy error to clipboard for easier debugging/reporting.
+		if m.shell != nil {
+			return m, copyToClipboard(m.shell, m.errorMsg)
+		}
 		return m, nil
 	}
 
@@ -236,6 +252,18 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tracker.loading = true
 			cmds = append(cmds, fetchWorklogsCmd(m.tracker.jira, m.tracker.accountID, m.tracker.currentDate))
 			pending++
+		}
+		// Best-effort git fetch for all known repos to keep version tags current.
+		if m.repos.git != nil {
+			for _, repo := range m.repos.repos {
+				if r := repo; r.Path != "" {
+					git := m.repos.git
+					cmds = append(cmds, func() tea.Msg {
+						_ = git.FetchAll(r.Path)
+						return nil
+					})
+				}
+			}
 		}
 		if pending > 0 {
 			m.refreshPending = pending
@@ -421,15 +449,44 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
-	// Notes messages — always routed to tracker regardless of active tab
-	if nu, ok := msg.(notesUpdatedMsg); ok {
+	// Notes messages — always routed to chats section regardless of active tab
+	if ns, ok := msg.(noteSavedMsg); ok {
 		var cmd tea.Cmd
-		m.tracker, cmd = m.tracker.update(nu)
+		m.chats, cmd = m.chats.update(ns)
 		return m, cmd
 	}
-	if nd, ok := msg.(noteDeleteMsg); ok {
+	if nr, ok := msg.(noteRemovedMsg); ok {
 		var cmd tea.Cmd
-		m.tracker, cmd = m.tracker.update(nd)
+		m.chats, cmd = m.chats.update(nr)
+		return m, cmd
+	}
+
+	// Templates messages — always routed to chats section regardless of active tab
+	if ts, ok := msg.(templateSavedMsg); ok {
+		var cmd tea.Cmd
+		m.chats, cmd = m.chats.update(ts)
+		return m, cmd
+	}
+	if tr, ok := msg.(templateRemovedMsg); ok {
+		var cmd tea.Cmd
+		m.chats, cmd = m.chats.update(tr)
+		return m, cmd
+	}
+
+	// Chats messages — route to chats section
+	if cl, ok := msg.(chatsLoadedMsg); ok {
+		var cmd tea.Cmd
+		m.chats, cmd = m.chats.update(cl)
+		return m, cmd
+	}
+	if ca, ok := msg.(chatsAuthStartedMsg); ok {
+		var cmd tea.Cmd
+		m.chats, cmd = m.chats.update(ca)
+		return m, cmd
+	}
+	if cd, ok := msg.(chatsAuthDoneMsg); ok {
+		var cmd tea.Cmd
+		m.chats, cmd = m.chats.update(cd)
 		return m, cmd
 	}
 
@@ -504,7 +561,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.activeTab = TabKube
 			return m, nil
 		case "5":
-			m.activeTab = TabTracker
+			m.activeTab = TabChats
 			return m, nil
 		case "0":
 			m.refreshGeneration++
@@ -606,7 +663,7 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					case kubePaneDeployments:
 						// deployments have no colour coding currently
 					}
-				case TabTracker:
+				case TabChats:
 					hm.topColorEntries = timeLogColorEntries
 					hm.topColorLabel = "Colours — time logged"
 					hm.bottomColorEntries = notePriorityColorEntries
@@ -633,8 +690,8 @@ func (m AppModel) updateActiveSection(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mrs, cmd = m.mrs.update(msg)
 	case TabKube:
 		m.kube, cmd = m.kube.update(msg)
-	case TabTracker:
-		m.tracker, cmd = m.tracker.update(msg)
+	case TabChats:
+		m.chats, cmd = m.chats.update(msg)
 	}
 	return m, cmd
 }
@@ -672,11 +729,12 @@ func (m AppModel) activeSectionKeys() []HelpEntry {
 		default:
 			return KubeConfigsKeys
 		}
-	case TabTracker:
-		if m.tracker.activePane == trackerPaneNotes {
-			return TrackerNotesKeys
+	case TabChats:
+		switch m.chats.activePane {
+		case ChatsPaneBottom:
+			return ChatsNotesKeys
 		}
-		return TrackerKeys
+		return ChatsTopKeys
 	}
 	return nil
 }
@@ -714,11 +772,11 @@ func (m AppModel) activeSectionName() string {
 			return "Kubernetes \u2014 Deployments"
 		}
 		return "Kubernetes \u2014 Configs"
-	case TabTracker:
-		if m.tracker.activePane == trackerPaneNotes {
-			return "Time Tracker \u2014 Notes"
+	case TabChats:
+		if m.chats.activePane == ChatsPaneBottom {
+			return "Chats — Notes & Templates"
 		}
-		return "Time Tracker"
+		return "Chats"
 	}
 	return tabLabels[m.activeTab]
 }
@@ -754,7 +812,7 @@ func (m AppModel) View() string {
 			Foreground(lipgloss.Color("255")).
 			Bold(true).
 			Width(m.width).
-			Render("  ✗ " + m.errorMsg + "  (esc to dismiss)")
+			Render("  ✗ " + m.errorMsg + "  (copied to clipboard · esc to dismiss)")
 		parts = append(parts, errBar)
 	}
 
@@ -810,8 +868,8 @@ func (m AppModel) renderActiveSection(height int) string {
 		return m.mrs.view(m.width, height)
 	case TabKube:
 		return m.kube.view(m.width, height)
-	case TabTracker:
-		return m.tracker.view(m.width, height)
+	case TabChats:
+		return m.chats.view(m.width, height)
 	}
 	return ""
 }

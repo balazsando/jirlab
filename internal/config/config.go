@@ -20,6 +20,10 @@ type Config struct {
 
 	GitLabToken  string
 	GitLabAPIURL string
+
+	// AzureClientID is the Azure App Registration client ID for Microsoft Graph
+	// (device code / delegated auth). Optional — Chats section is disabled if absent.
+	AzureClientID string
 }
 
 // Load reads configuration from environment variables and an optional .env file.
@@ -45,6 +49,7 @@ func Load() (*Config, error) {
 		JiraBoardID:  v.GetString("JIRA_BOARD_ID"),
 		GitLabToken:  v.GetString("GITLAB_TOKEN"),
 		GitLabAPIURL: v.GetString("GITLAB_API_URL"),
+		AzureClientID: v.GetString("AZURE_CLIENT_ID"),
 	}
 
 	if err := cfg.validate(); err != nil {

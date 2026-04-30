@@ -24,7 +24,7 @@ jirlab is a terminal user interface (TUI) for managing Jira issues, GitLab merge
 │  cmd/           CLI entry points (Cobra)             │
 ├──────────────────────────────────────────────────────┤
 │  internal/tui/  Bubble Tea UI sections               │
-│                 (board, repos, mrs, kube, tracker)   │
+│                 (board, repos, mrs, kube, chats)     │
 ├──────────────────────────────────────────────────────┤
 │  internal/integration/  External service interfaces  │
 │    JiraService       — Jira use-cases                │
@@ -33,6 +33,7 @@ jirlab is a terminal user interface (TUI) for managing Jira issues, GitLab merge
 │    KubectlService    — kubectl subprocess abstraction│
 │    FilesystemService — file write abstraction        │
 │    ShellService      — browser / clipboard / editor  │
+│    MSGraphService    — Microsoft Graph API (Teams)   │
 ├──────────────────────────────────────────────────────┤
 │  internal/service/  HTTP clients + domain models     │
 │    JiraClient     — REST calls to Jira               │
@@ -46,6 +47,7 @@ The **integration layer** wraps all subprocess calls (git, kubectl), HTTP client
 The **service layer** holds domain models and HTTP client implementations.
 
 See [ADR 002](adr/002-integration-layer.md) for the rationale behind this pattern.
+See [ADR 004](adr/004-msgraph-integration.md) for the MS Graph integration decision.
 
 ---
 
@@ -61,21 +63,25 @@ graph TD
     tui --> repos["ReposSection"]
     tui --> mrs["MRsSection"]
     tui --> kube["KubeSection"]
-    tui --> tracker["TrackerSection"]
+    tui --> tracker["TrackerSection (worklog state)"]
+    tui --> chats["ChatsSection"]
 
     board --> jiraSvc["integration.JiraService"]
     board --> gitlabSvc["integration.GitLabService"]
     board --> gitSvc["integration.GitCmdService"]
     board --> shellSvc["integration.ShellService"]
+    board --> fsSvc["integration.FilesystemService"]
     repos --> gitSvc
     repos --> shellSvc
     mrs --> gitlabSvc
     mrs --> gitSvc
-    mrs --> fsSvc["integration.FilesystemService"]
+    mrs --> fsSvc
     mrs --> shellSvc
     kube --> kubectlSvc["integration.KubectlService"]
     tracker --> jiraSvc
     tracker --> shellSvc
+    chats --> msgraphSvc["integration.MSGraphService"]
+    chats --> shellSvc
 
     jiraSvc --> jiraClient["service.JiraClient (REST)"]
     gitlabSvc --> gitlabClient["service.GitLabClient (REST)"]
@@ -83,6 +89,7 @@ graph TD
     kubectlSvc --> kubectlBin["kubectl binary (subprocess)"]
     shellSvc --> osBin["OS: browser / clipboard / editor"]
     fsSvc --> osFS["OS: filesystem"]
+    msgraphSvc --> msGraph["Microsoft Graph API (raw HTTP)"]
 ```
 
 ---
@@ -169,8 +176,12 @@ cmd/                    Cobra CLI entry points
 internal/
   config/               Viper-based config loader
   service/              GitLab & Jira REST API clients + domain models
-  integration/          Higher-level use-case services
+  integration/          External service interfaces + adapters
+                          (JiraService, GitLabService, GitCmdService,
+                           KubectlService, FilesystemService, ShellService,
+                           MSGraphService — interface + raw HTTP client)
   actions/              Issue transition helpers
+  notes/                Note model, filesystem store, and migration helper
   git/                  Branch creation logic
   background/           Periodic refresh worker
   debug/                Optional debug logger
@@ -179,18 +190,28 @@ internal/
     board.go            Sprint board tab
     repos.go            Repositories tab
     mrs.go              Merge requests tab
-    tracker.go          Time tracker tab
+    kube.go             Kubernetes tab
+    chats.go            Chats tab (Teams + notes/templates)
+    tracker.go          Worklog state holder (used by Board l key)
+    notes.go            Note helpers, message types, and modals
     modal.go            Modal overlays
     colors.go           Issue/MR/worklog/branch/pipeline colour rules
     keys.go             Help key definitions
     styles.go           Lip Gloss style constants + table separator helpers
-    helpers.go          Shared TUI helpers (truncStr, openBrowserCmd, etc.)
+    helpers.go          Shared TUI helpers (truncStr, openBrowserCmd, SaveTicketDescription, SaveMRPatch, etc.)
     git_ops.go          Git command tea.Cmds (checkout, branch, navigate)
     sysattr_unix.go     Platform-specific process detachment
 docs/
   architecture.md       This file
   adr/                  Architecture Decision Records
+    001-tui-framework.md
+    002-integration-layer.md
+    003-kube-exec.md
+    004-msgraph-integration.md
 main.go                 Entry point
+features/               ATDD Godog acceptance test suites
+  *.feature             Gherkin scenario files
+  *_test.go             Godog step definitions + test suites
 ```
 
 ---
@@ -281,3 +302,47 @@ The root `Update` method routes each `tea.Msg` to the correct section.
 | [ADR 001](adr/001-technology-choices.md) | Technology choices (Bubble Tea, Cobra, hand-rolled REST clients) |
 | [ADR 002](adr/002-integration-layer.md) | Integration layer pattern (all external calls behind interfaces) |
 | [ADR 003](adr/003-kubernetes-integration.md) | Kubernetes integration design (kubectl CLI, kubeconfig discovery, auto-refresh) |
+
+---
+
+## Notes Subsystem
+
+Notes are stored as individual files under `<UserCacheDir>/jirlab/notes/` (e.g. `~/.cache/jirlab/notes/` on Linux).
+
+### File format
+
+Each note is a UTF-8 plain-text file (`<id>.note`) using a compact properties + body layout:
+
+```
+id=a1b2c3d4
+title=My Note
+category=work
+priority=1
+created=1714262400000000000
+updated=1714262400000000000
+task=t1:false:Buy groceries
+task=t2:true:Do laundry
+---
+Description body here.
+Can span multiple lines.
+```
+
+- Header lines are `key=value` (split on the first `=`).
+- Task lines are `task=<id>:<done>:<text>` (split on the first two `:`; text may contain colons).
+- Everything after the `---` separator line is the description body.
+- Timestamps are Unix nanoseconds stored as decimal integers.
+
+### CLI commands
+
+| Command | Description |
+|---------|-------------|
+| `jirlab note add <title> [body]` | Create a note; prints the new ID |
+| `jirlab note list` | List all notes (newest first) |
+| `jirlab note show <id>` | Print full note content |
+| `jirlab note delete <id>` | Delete a note and remove its file |
+
+Flags for `note add`: `--category / -c`, `--priority / -p` (0=Low, 1=Med, 2=High).
+
+### Migration
+
+On startup the TUI automatically migrates any notes found in the legacy `~/.jirlab/notes.json` (single JSON array format) into the per-file store, then removes the old file.

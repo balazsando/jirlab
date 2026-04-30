@@ -264,6 +264,57 @@ func (m InputModal) view(width, _ int) string {
 }
 
 // ---------------------------------------------------------------------------
+// NumericHoursModal
+// ---------------------------------------------------------------------------
+
+// NumericHoursModal is a single-character numeric input for logging hours.
+// Each digit keypress overwrites the current value; non-digit input is ignored.
+// The default value is "8". onSubmit receives the hours as an integer.
+type NumericHoursModal struct {
+	title    string
+	value    string // always a single digit string, default "8"
+	onSubmit func(hours int) tea.Cmd
+}
+
+// NewNumericHoursModal creates a NumericHoursModal with a default of 8 hours.
+func NewNumericHoursModal(title string, onSubmit func(hours int) tea.Cmd) NumericHoursModal {
+	return NumericHoursModal{title: title, value: "8", onSubmit: onSubmit}
+}
+
+func (m NumericHoursModal) update(msg tea.Msg) (modal, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok {
+		switch k.String() {
+		case "esc":
+			return nil, nil
+		case "enter":
+			if m.onSubmit != nil {
+				hours := int(m.value[0] - '0')
+				if hours == 0 {
+					hours = 1 // prevent 0-hour log
+				}
+				return nil, m.onSubmit(hours)
+			}
+			return nil, nil
+		default:
+			m.value = NumericInputHandleKey(m.value, k.String())
+		}
+	}
+	return m, nil
+}
+
+func (m NumericHoursModal) view(width, _ int) string {
+	maxW := width - 10
+	if maxW < 40 {
+		maxW = 40
+	}
+	display := lipgloss.NewStyle().Bold(true).Foreground(colorGreen).Render(m.value + "h")
+	body := modalTitleStyle.Render(m.title) + "\n\n" +
+		"Hours: " + display +
+		modalHintStyle.Render("\n\n0-9: set hours  enter: confirm  esc: cancel")
+	return modalBoxStyle.Width(maxW).Render(body)
+}
+
+// ---------------------------------------------------------------------------
 // ConfirmModal
 // ---------------------------------------------------------------------------
 

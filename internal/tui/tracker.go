@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -9,7 +10,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/andob/jirlab/internal/integration"
+	"github.com/andob/jirlab/internal/notes"
 	"github.com/andob/jirlab/internal/service"
+	"github.com/andob/jirlab/internal/templates"
 )
 
 // worklogsLoadedMsg is delivered when worklog fetching completes.
@@ -57,6 +60,52 @@ func trackerLogWorkCmd(jira integration.JiraService, issueKey string, fromH, fro
 	}
 }
 
+// hasLogsInRange checks if any worklog in the slice overlaps with the given time range on the given date.
+func hasLogsInRange(logs []service.TimeLog, date time.Time, startH, endH int) bool {
+	start := time.Date(date.Year(), date.Month(), date.Day(), startH, 0, 0, 0, date.Location())
+	end := time.Date(date.Year(), date.Month(), date.Day(), endH, 0, 0, 0, date.Location())
+	for _, log := range logs {
+		// Check if log overlaps with [start, end)
+		if log.From.Before(end) && log.To.After(start) {
+			return true
+		}
+	}
+	return false
+}
+
+// LatestLogEndHour returns the end hour of the latest worklog on date.
+// Returns 8 (default start-of-day) when no logs exist for the given date.
+// Exported so acceptance tests can verify the calculation directly.
+func LatestLogEndHour(logs []service.TimeLog, date time.Time) int {
+	dayStart := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+	dayEnd := dayStart.Add(24 * time.Hour)
+
+	latestEnd := 0
+	for _, log := range logs {
+		if log.To.Before(dayStart) || log.To.After(dayEnd) {
+			continue
+		}
+		if log.To.Hour() > latestEnd {
+			latestEnd = log.To.Hour()
+		}
+	}
+	if latestEnd == 0 {
+		return 8 // default: work starts at 8
+	}
+	return latestEnd
+}
+
+// NumericInputHandleKey processes a single keypress for the hours input widget.
+// Only digit characters are accepted; each digit overwrites the current value.
+// Non-digit input is ignored and the current value is returned unchanged.
+// Exported so acceptance tests can verify the input behaviour directly.
+func NumericInputHandleKey(current, key string) string {
+	if len(key) == 1 && key[0] >= '0' && key[0] <= '9' {
+		return key
+	}
+	return current
+}
+
 // ---------------------------------------------------------------------------
 // Tracker sub-pane enum
 // ---------------------------------------------------------------------------
@@ -64,8 +113,9 @@ func trackerLogWorkCmd(jira integration.JiraService, issueKey string, fromH, fro
 type trackerPane int
 
 const (
-	trackerPaneWorklogs trackerPane = iota
+	trackerPaneWorklogs  trackerPane = iota
 	trackerPaneNotes
+	trackerPaneTemplates
 )
 
 // TrackerSection is the Time Tracker tab.
@@ -82,27 +132,47 @@ type TrackerSection struct {
 
 	// Notes sub-pane
 	activePane    trackerPane
-	notes         []note
-	notesFiltered []note // sorted+filtered view
+	notes         []notes.Note
+	notesFiltered []notes.Note // sorted+filtered view
 	notesCursor   int
 	notesSort     notesSortMode
 	notesFilter   string // "" = all categories
-	notesPath     string
+	notesStore    notes.Store
+
+	// Templates sub-pane
+	templates       []templates.Template
+	templatesCursor int
+	templatesStore  templates.Store
 }
 
 func newTrackerSection(jira integration.JiraService, accountID string, shell integration.ShellService) TrackerSection {
 	now := time.Now()
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	path := notesFilePath()
-	notes := loadNotes(path)
+
+	store, _ := notes.DefaultStore()
+	if store == nil {
+		store = notes.NewFilesystemStore("/tmp/jirlab-notes")
+	}
+	// One-shot migration from legacy ~/.jirlab/notes.json
+	_ = notes.MigrateFromJSON(store, notes.LegacyJSONPath())
+	notesList, _ := store.List()
+
+	tmplStore, _ := templates.DefaultStore()
+	if tmplStore == nil {
+		tmplStore = templates.NewFilesystemStore(os.TempDir() + "/jirlab-templates")
+	}
+	tmplList, _ := tmplStore.List()
+
 	s := TrackerSection{
-		currentDate: today,
-		loading:     jira != nil,
-		jira:        jira,
-		accountID:   accountID,
-		shell:       shell,
-		notes:       notes,
-		notesPath:   path,
+		currentDate:    today,
+		loading:        jira != nil,
+		jira:           jira,
+		accountID:      accountID,
+		shell:          shell,
+		notes:          notesList,
+		notesStore:     store,
+		templates:      tmplList,
+		templatesStore: tmplStore,
 	}
 	s.rebuildNotesView()
 	return s
@@ -159,14 +229,44 @@ func (s TrackerSection) update(msg tea.Msg) (TrackerSection, tea.Cmd) {
 	case notesSavedMsg:
 		// no-op: save is fire-and-forget
 
-	case notesUpdatedMsg:
-		s.notes = msg.notes
+	case noteSavedMsg:
+		if msg.isNew {
+			s.notes = append(s.notes, msg.note)
+		} else {
+			for i, n := range s.notes {
+				if n.ID == msg.note.ID {
+					s.notes[i] = msg.note
+					break
+				}
+			}
+		}
 		s.rebuildNotesView()
+		return s, notePersistCmd(s.notesStore, msg.note)
 
-	case noteDeleteMsg:
-		s.notes = deleteNote(s.notes, msg.noteIdx)
+	case noteRemovedMsg:
+		s.notes = removeNoteByID(s.notes, msg.id)
 		s.rebuildNotesView()
-		return s, saveNotesCmd(s.notesPath, s.notes)
+		return s, noteDeleteFileCmd(s.notesStore, msg.id)
+
+	case templateSavedMsg:
+		if msg.isNew {
+			s.templates = append(s.templates, msg.tmpl)
+		} else {
+			for i, t := range s.templates {
+				if t.ID == msg.tmpl.ID {
+					s.templates[i] = msg.tmpl
+					break
+				}
+			}
+		}
+		return s, templatePersistCmd(s.templatesStore, msg.tmpl)
+
+	case templateRemovedMsg:
+		s.templates = removeTemplateByID(s.templates, msg.id)
+		if s.templatesCursor >= len(s.templates) {
+			s.templatesCursor = max(0, len(s.templates)-1)
+		}
+		return s, templateDeleteFileCmd(s.templatesStore, msg.id)
 
 	case tea.KeyMsg:
 		return s.handleKey(msg)
@@ -174,32 +274,53 @@ func (s TrackerSection) update(msg tea.Msg) (TrackerSection, tea.Cmd) {
 	return s, nil
 }
 
-// deleteNote removes the note at originalIdx from the slice.
-func deleteNote(notes []note, originalIdx int) []note {
-	if originalIdx < 0 || originalIdx >= len(notes) {
-		return notes
+// removeNoteByID removes the note with the given ID from the slice.
+func removeNoteByID(ns []notes.Note, id string) []notes.Note {
+	out := make([]notes.Note, 0, len(ns))
+	for _, n := range ns {
+		if n.ID != id {
+			out = append(out, n)
+		}
 	}
-	out := make([]note, 0, len(notes)-1)
-	out = append(out, notes[:originalIdx]...)
-	out = append(out, notes[originalIdx+1:]...)
+	return out
+}
+
+// removeTemplateByID removes the template with the given ID from the slice.
+func removeTemplateByID(ts []templates.Template, id string) []templates.Template {
+	out := make([]templates.Template, 0, len(ts))
+	for _, t := range ts {
+		if t.ID != id {
+			out = append(out, t)
+		}
+	}
 	return out
 }
 
 func (s TrackerSection) handleKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
-	// tab switches between worklogs and notes
+	// tab cycles through all three panes
 	if msg.String() == "tab" {
-		if s.activePane == trackerPaneWorklogs {
-			s.activePane = trackerPaneNotes
-		} else {
-			s.activePane = trackerPaneWorklogs
-		}
+		s.activePane = (s.activePane + 1) % 3
 		return s, nil
 	}
 
-	if s.activePane == trackerPaneNotes {
-		return s.handleNotesKey(msg)
+	// direct pane-jump hotkeys available from any pane
+	switch msg.String() {
+	case "o":
+		s.activePane = trackerPaneNotes
+		return s, nil
+	case "t":
+		s.activePane = trackerPaneTemplates
+		return s, nil
 	}
-	return s.handleWorklogsKey(msg)
+
+	switch s.activePane {
+	case trackerPaneNotes:
+		return s.handleNotesKey(msg)
+	case trackerPaneTemplates:
+		return s.handleTemplatesKey(msg)
+	default:
+		return s.handleWorklogsKey(msg)
+	}
 }
 
 func (s TrackerSection) handleWorklogsKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
@@ -231,28 +352,27 @@ func (s TrackerSection) handleWorklogsKey(msg tea.KeyMsg) (TrackerSection, tea.C
 			s.loading = true
 			return s, fetchWorklogsCmd(s.jira, s.accountID, s.currentDate)
 		}
-	case "l": // log full day 8:00-16:00
+	case "l": // log work — ask issue key first, then hours
 		if s.jira != nil {
 			jira := s.jira
+			logs := s.logs
+			currentDate := s.currentDate
 			return s, func() tea.Msg {
+				startH := LatestLogEndHour(logs, currentDate)
 				return OpenModalMsg{M: NewInputModal(
-					"Log Full Day (8h)",
-					"Issue key (e.g. PROJ-123)",
+					fmt.Sprintf("Log Work (start %d:00) — Issue Key", startH),
+					"e.g. PROJ-123",
 					func(issueKey string) tea.Cmd {
-						return trackerLogWorkCmd(jira, issueKey, 8, 0, 16, 0)
-					},
-				)}
-			}
-		}
-	case "h": // log half day 8:00-12:00
-		if s.jira != nil {
-			jira := s.jira
-			return s, func() tea.Msg {
-				return OpenModalMsg{M: NewInputModal(
-					"Log Half Day (4h)",
-					"Issue key (e.g. PROJ-123)",
-					func(issueKey string) tea.Cmd {
-						return trackerLogWorkCmd(jira, issueKey, 8, 0, 12, 0)
+						return func() tea.Msg {
+							title := fmt.Sprintf("Log Work for %s (start %d:00) — Hours", issueKey, startH)
+							return OpenModalMsg{M: NewNumericHoursModal(title, func(hours int) tea.Cmd {
+								endH := startH + hours
+								if endH > 16 {
+									endH = 16
+								}
+								return trackerLogWorkCmd(jira, issueKey, startH, 0, endH, 0)
+							})}
+						}
 					},
 				)}
 			}
@@ -280,11 +400,10 @@ func (s TrackerSection) handleNotesKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd)
 
 	case "n": // new note
 		cats := uniqueCategories(s.notes)
-		currentNotes := s.notes
 		return s, func() tea.Msg {
-			return OpenModalMsg{M: NewNoteCreateModal(cats, func(newNote note) tea.Cmd {
+			return OpenModalMsg{M: NewNoteCreateModal(cats, func(newNote notes.Note) tea.Cmd {
 				return func() tea.Msg {
-					return notesUpdatedMsg{notes: append(currentNotes, newNote)}
+					return noteSavedMsg{note: newNote, isNew: true}
 				}
 			})}
 		}
@@ -294,25 +413,10 @@ func (s TrackerSection) handleNotesKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd)
 			break
 		}
 		sel := s.notesFiltered[s.notesCursor]
-		// find original index in s.notes
-		origIdx := -1
-		for i, n := range s.notes {
-			if n.ID == sel.ID {
-				origIdx = i
-				break
-			}
-		}
-		if origIdx < 0 {
-			break
-		}
-		notesSlice := s.notes
 		return s, func() tea.Msg {
-			return OpenModalMsg{M: NewNoteDetailModal(origIdx, sel, func(updated note) tea.Cmd {
+			return OpenModalMsg{M: NewNoteDetailModal(sel, func(updated notes.Note) tea.Cmd {
 				return func() tea.Msg {
-					newNotes := make([]note, len(notesSlice))
-					copy(newNotes, notesSlice)
-					newNotes[origIdx] = updated
-					return notesUpdatedMsg{notes: newNotes}
+					return noteSavedMsg{note: updated, isNew: false}
 				}
 			})}
 		}
@@ -353,24 +457,65 @@ func (s TrackerSection) handleNotesKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd)
 			break
 		}
 		sel := s.notesFiltered[s.notesCursor]
-		origIdx := -1
-		for i, n := range s.notes {
-			if n.ID == sel.ID {
-				origIdx = i
-				break
-			}
-		}
-		if origIdx < 0 {
-			break
-		}
 		noteTitle := sel.Title
-		notesSlice := s.notes
+		noteID := sel.ID
 		return s, func() tea.Msg {
 			return OpenModalMsg{M: ConfirmModal{
 				message: fmt.Sprintf("Delete note: %s?", truncStr(noteTitle, 40)),
 				onConfirm: func() tea.Msg {
-					newNotes := deleteNote(notesSlice, origIdx)
-					return notesUpdatedMsg{notes: newNotes}
+					return noteRemovedMsg{id: noteID}
+				},
+			}}
+		}
+	}
+	return s, nil
+}
+
+func (s TrackerSection) handleTemplatesKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		if s.templatesCursor < len(s.templates)-1 {
+			s.templatesCursor++
+		}
+	case "k", "up":
+		if s.templatesCursor > 0 {
+			s.templatesCursor--
+		}
+
+	case "n": // new template
+		return s, func() tea.Msg {
+			return OpenModalMsg{M: NewTemplateCreateModal(func(t templates.Template) tea.Cmd {
+				return func() tea.Msg {
+					return templateSavedMsg{tmpl: t, isNew: true}
+				}
+			})}
+		}
+
+	case "enter": // edit selected template
+		if len(s.templates) == 0 || s.templatesCursor >= len(s.templates) {
+			break
+		}
+		sel := s.templates[s.templatesCursor]
+		return s, func() tea.Msg {
+			return OpenModalMsg{M: NewTemplateEditModal(sel, func(t templates.Template) tea.Cmd {
+				return func() tea.Msg {
+					return templateSavedMsg{tmpl: t, isNew: false}
+				}
+			})}
+		}
+
+	case "d": // delete selected template
+		if len(s.templates) == 0 || s.templatesCursor >= len(s.templates) {
+			break
+		}
+		sel := s.templates[s.templatesCursor]
+		tmplName := sel.Name
+		tmplID := sel.ID
+		return s, func() tea.Msg {
+			return OpenModalMsg{M: ConfirmModal{
+				message: fmt.Sprintf("Delete template: %s?", truncStr(tmplName, 40)),
+				onConfirm: func() tea.Msg {
+					return templateRemovedMsg{id: tmplID}
 				},
 			}}
 		}
@@ -379,7 +524,7 @@ func (s TrackerSection) handleNotesKey(msg tea.KeyMsg) (TrackerSection, tea.Cmd)
 }
 
 func (s TrackerSection) view(width, height int) string {
-	// Vertical split: worklogs top, notes bottom.
+	// Vertical split: worklogs top, bottom pane below.
 	// Overhead: sep(1) + paneBar(1) + paneSep(1) = 3 rows between sections.
 	topH := height * 55 / 100
 	if topH < 4 {
@@ -392,24 +537,40 @@ func (s TrackerSection) view(width, height int) string {
 
 	worklogsFocused := s.activePane == trackerPaneWorklogs
 	notesFocused := s.activePane == trackerPaneNotes
+	templatesFocused := s.activePane == trackerPaneTemplates
 
 	top := s.viewWorklogs(width, topH, worklogsFocused)
 	sep := sectionSepLine(width)
-	paneBar := s.viewNotesPaneBar(width, notesFocused)
+	paneBar := s.viewBottomPaneBar(width)
 	paneSep := sectionSepLine(width)
-	bot := s.viewNotes(width, botH, notesFocused)
+
+	var bot string
+	switch s.activePane {
+	case trackerPaneTemplates:
+		bot = s.viewTemplates(width, botH, templatesFocused)
+	default:
+		bot = s.viewNotes(width, botH, notesFocused)
+	}
 
 	return strings.Join([]string{top, sep, paneBar, paneSep, bot}, "\n")
 }
 
-// viewNotesPaneBar renders the Notes sub-section tab bar, matching the design of
-// the Pods/Services/Deployments and Branches/Tags pane bars in other sections.
-func (s TrackerSection) viewNotesPaneBar(width int, focused bool) string {
-	label := s.notesHeader()
-	if focused {
-		return tabActiveStyle.Render(label)
+// viewBottomPaneBar renders a tab bar for the two bottom sub-panes (Notes and Templates).
+func (s TrackerSection) viewBottomPaneBar(width int) string {
+	noteLabel := s.notesHeader()
+	tmplLabel := fmt.Sprintf("Templates (%d)", len(s.templates))
+
+	notesTab := tabDimStyle.Render("[o] " + noteLabel)
+	tmplTab := tabDimStyle.Render("[t] " + tmplLabel)
+
+	switch s.activePane {
+	case trackerPaneNotes:
+		notesTab = tabActiveStyle.Render("[o] " + noteLabel)
+	case trackerPaneTemplates:
+		tmplTab = tabActiveStyle.Render("[t] " + tmplLabel)
 	}
-	return tabDimStyle.Render(label)
+
+	return notesTab + "  " + tmplTab
 }
 
 // notesHeader builds the Notes section label including count, filter, and sort info.
@@ -511,7 +672,7 @@ func (s TrackerSection) viewWorklogs(width, height int, focused bool) string {
 	result := strings.Join(lines, "\n")
 	result += "\n" + tableHeaderSepLine(width)
 	result += "\n" + TimeLogColorLegendBar(width)
-	result += "\n" + lipgloss.NewStyle().Foreground(colorSubtle).Render("  l: log full day  h: log half day  ←/→: prev/next day  w: timetracker  tab: notes")
+	result += "\n" + lipgloss.NewStyle().Foreground(colorSubtle).Render("  l: log full day  h: log half day  ←/→: prev/next day  w: timetracker  o: notes  t: templates")
 	if s.statusMsg != "" {
 		result += "\n" + lipgloss.NewStyle().Foreground(colorGreen).Render("  "+s.statusMsg)
 	}
@@ -560,10 +721,10 @@ func (s TrackerSection) viewNotes(width, height int, focused bool) string {
 			titleW, truncStr(nn.Title, titleW),
 			catW, truncStr(nn.Category, catW),
 			prioW, truncStr(nn.Priority.String(), prioW),
-			tasksW, truncStr(nn.taskSummary(), tasksW),
+			tasksW, truncStr(noteTaskSummary(nn), tasksW),
 			dateW, truncStr(nn.CreatedAt.Format("2006-01-02"), dateW),
 		)
-		col := nn.Priority.Color()
+		col := notePriorityColor(nn.Priority)
 		if i == s.notesCursor {
 			rows = append(rows, selRow.Foreground(col).Width(width).Render(line))
 		} else {
@@ -573,14 +734,71 @@ func (s TrackerSection) viewNotes(width, height int, focused bool) string {
 	rows = append(rows, tableHeaderSepLine(width))
 	rows = append(rows, NotePriorityLegendBar(width))
 	rows = append(rows, lipgloss.NewStyle().Foreground(colorSubtle).Render(
-		"  n: new  enter: open  d: delete  s: sort  f: filter  tab: worklogs",
+		"  n: new  enter: open  d: delete  s: sort  f: filter  tab: cycle panes",
+	))
+	return strings.Join(rows, "\n")
+}
+
+func (s TrackerSection) viewTemplates(width, height int, focused bool) string {
+	selRow := selectedRowDimStyle
+	if focused {
+		selRow = selectedRowStyle
+	}
+
+	if len(s.templates) == 0 {
+		empty := lipgloss.NewStyle().Foreground(colorMuted).Padding(0, 2).Render("No templates. Press n to create one.")
+		return empty
+	}
+
+	nameW := width / 3
+	previewW := width - nameW - 14 - 4
+	dateW := 12
+	if previewW < 10 {
+		previewW = 10
+	}
+	if nameW < 12 {
+		nameW = 12
+	}
+
+	colH := func(s string, w int) string { return columnHeaderStyle.Width(w).Render(truncStr(s, w)) }
+	tableHeader := colH("NAME", nameW) + " " + colH("BODY PREVIEW", previewW) + " " + colH("CREATED", dateW)
+
+	maxRows := height - 4
+	if maxRows < 1 {
+		maxRows = 1
+	}
+	start, end := scrollWindow(s.templatesCursor, len(s.templates), maxRows)
+
+	var rows []string
+	rows = append(rows, tableHeader, tableHeaderSepLine(width))
+	for i := start; i < end; i++ {
+		tmpl := s.templates[i]
+		preview := strings.ReplaceAll(tmpl.Body, "\n", " ")
+		line := fmt.Sprintf("%-*s %-*s %-*s",
+			nameW, truncStr(tmpl.Name, nameW),
+			previewW, truncStr(preview, previewW),
+			dateW, truncStr(tmpl.CreatedAt.Format("2006-01-02"), dateW),
+		)
+		if i == s.templatesCursor {
+			rows = append(rows, selRow.Width(width).Render(line))
+		} else {
+			rows = append(rows, normalRowStyle.Width(width).Render(line))
+		}
+	}
+	rows = append(rows, tableHeaderSepLine(width))
+	rows = append(rows, lipgloss.NewStyle().Foreground(colorSubtle).Render(
+		"  n: new  enter: edit  d: delete  tab: cycle panes",
 	))
 	return strings.Join(rows, "\n")
 }
 
 func (s TrackerSection) helpKeys() []HelpEntry {
-	if s.activePane == trackerPaneNotes {
+	switch s.activePane {
+	case trackerPaneNotes:
 		return TrackerNotesKeys
+	case trackerPaneTemplates:
+		return TrackerTemplatesKeys
+	default:
+		return TrackerKeys
 	}
-	return TrackerKeys
 }

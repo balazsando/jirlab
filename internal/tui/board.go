@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/andob/jirlab/internal/actions"
 	"github.com/andob/jirlab/internal/integration"
 	"github.com/andob/jirlab/internal/service"
+	"github.com/andob/jirlab/internal/templates"
 )
 
 // --- Message types ---
@@ -33,40 +35,48 @@ type boardActionDoneMsg struct {
 // --- BoardSection ---
 
 type BoardSection struct {
-	allIssues     []service.Issue // all sprint issues, unfiltered
-	cursor        int
-	loading       bool
-	filtered      bool // f-key toggle
-	statusMsg     string
-	boardID       string
-	jira          integration.JiraService
-	gitlab        integration.GitLabService
-	git           integration.GitCmdService
-	shell         integration.ShellService
-	myUserKey     string            // Jira account ID of current user
-	jiraBaseURL   string            // e.g. https://company.atlassian.net
-	mrStatuses    map[string]mrInfo // issue key -> MR info
-	localBranches map[string]bool   // issue key -> has local branch
-	branchNames   map[string]string // issue key -> branch name for display
-	repos         []service.Repo    // all known repos (for branch creation)
-	repoPaths     map[string]string // issue key -> repo path (for navigate)
-	termHeight    int               // terminal height, set on resize
+	allIssues      []service.Issue // all sprint issues, unfiltered
+	cursor         int
+	loading        bool
+	filtered       bool // f-key toggle
+	statusMsg      string
+	boardID        string
+	jira           integration.JiraService
+	gitlab         integration.GitLabService
+	git            integration.GitCmdService
+	fs             integration.FilesystemService
+	shell          integration.ShellService
+	myUserKey      string            // Jira account ID of current user
+	jiraBaseURL    string            // e.g. https://company.atlassian.net
+	mrStatuses     map[string]mrInfo // issue key -> MR info
+	localBranches  map[string]bool   // issue key -> has local branch
+	branchNames    map[string]string // issue key -> branch name for display
+	repos          []service.Repo    // all known repos (for branch creation)
+	repoPaths      map[string]string // issue key -> repo path (for navigate)
+	termHeight     int               // terminal height, set on resize
+	templatesStore templates.Store   // shared with TrackerSection
 }
 
 func newBoardSection(jira integration.JiraService, gitlab integration.GitLabService, git integration.GitCmdService, shell integration.ShellService, boardID, myUserKey, jiraBaseURL string) BoardSection {
+	tmplStore, _ := templates.DefaultStore()
+	if tmplStore == nil {
+		tmplStore = templates.NewFilesystemStore(os.TempDir() + "/jirlab-templates")
+	}
 	return BoardSection{
-		boardID:       boardID,
-		jira:          jira,
-		gitlab:        gitlab,
-		git:           git,
-		shell:         shell,
-		myUserKey:     myUserKey,
-		jiraBaseURL:   jiraBaseURL,
-		loading:       jira != nil && boardID != "",
-		mrStatuses:    make(map[string]mrInfo),
-		localBranches: make(map[string]bool),
-		branchNames:   make(map[string]string),
-		repoPaths:     make(map[string]string),
+		boardID:        boardID,
+		jira:           jira,
+		gitlab:         gitlab,
+		git:            git,
+		fs:             integration.NewFilesystemService(),
+		shell:          shell,
+		myUserKey:      myUserKey,
+		jiraBaseURL:    jiraBaseURL,
+		loading:        jira != nil && boardID != "",
+		mrStatuses:     make(map[string]mrInfo),
+		localBranches:  make(map[string]bool),
+		branchNames:    make(map[string]string),
+		repoPaths:      make(map[string]string),
+		templatesStore: tmplStore,
 	}
 }
 
@@ -131,10 +141,7 @@ func pickIssueCmd(jira integration.JiraService, issueKey string) tea.Cmd {
 		if err := actions.PickupIssue(jira, issueKey); err != nil {
 			return errMsg{source: "board", err: err}
 		}
-		if err := jira.AssignToMe(issueKey); err != nil {
-			return errMsg{source: "board", err: err}
-		}
-		return boardActionDoneMsg{message: fmt.Sprintf("Picked %s → In Progress + assigned to me", issueKey), reload: true}
+		return boardActionDoneMsg{message: fmt.Sprintf("Picked %s → In Progress", issueKey), reload: true}
 	}
 }
 
@@ -143,10 +150,7 @@ func moveToTestingCmd(jira integration.JiraService, issueKey string) tea.Cmd {
 		if err := actions.MoveToTestEnv(jira, issueKey); err != nil {
 			return errMsg{source: "board", err: err}
 		}
-		if err := jira.Unassign(issueKey); err != nil {
-			return errMsg{source: "board", err: err}
-		}
-		return boardActionDoneMsg{message: fmt.Sprintf("Moved %s → Testing + unassigned", issueKey), reload: true}
+		return boardActionDoneMsg{message: fmt.Sprintf("Moved %s → Testing", issueKey), reload: true}
 	}
 }
 
@@ -293,7 +297,7 @@ func (s BoardSection) handleKey(msg tea.KeyMsg) (BoardSection, tea.Cmd) {
 			jr, key := s.jira, issue.Key
 			return s, func() tea.Msg {
 				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Move %s → In Progress and assign to me?", key),
+					message:   fmt.Sprintf("Move %s → In Progress?", key),
 					onConfirm: pickIssueCmd(jr, key),
 				}}
 			}
@@ -304,7 +308,7 @@ func (s BoardSection) handleKey(msg tea.KeyMsg) (BoardSection, tea.Cmd) {
 			jr, key := s.jira, issue.Key
 			return s, func() tea.Msg {
 				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Move %s → Testing and unassign?", key),
+					message:   fmt.Sprintf("Move %s → Testing?", key),
 					onConfirm: moveToTestingCmd(jr, key),
 				}}
 			}
@@ -351,35 +355,38 @@ func (s BoardSection) handleKey(msg tea.KeyMsg) (BoardSection, tea.Cmd) {
 	case "c": // comment
 		if issue := s.selectedIssue(); issue != nil && s.jira != nil {
 			key := issue.Key
+			jr := s.jira
+			store := s.templatesStore
 			return s, func() tea.Msg {
-				return OpenModalMsg{M: NewInputModal(
-					fmt.Sprintf("Comment on %s", key),
-					"Type your comment...",
-					func(text string) tea.Cmd {
-						return addCommentCmd(s.jira, key, text)
+				commentTitle := fmt.Sprintf("Comment on %s", key)
+				onConfirm := func(text string) tea.Cmd { return addCommentCmd(jr, key, text) }
+				if store != nil {
+					tmpls, err := store.List()
+					if err != nil {
+						return errMsg{source: "templates", err: err}
+					}
+					if len(tmpls) > 0 {
+						return OpenModalMsg{M: newCommentWithTemplateModal(tmpls, commentTitle, onConfirm)}
+					}
+				}
+				return OpenModalMsg{M: newCommentInputModal(commentTitle, "", onConfirm)}
+			}
+		}
+
+	case "l": // log work — ask issue key, then hours (auto-calculates start from existing logs)
+		if issue := s.selectedIssue(); issue != nil && s.jira != nil {
+			jr, key := s.jira, issue.Key
+			return s, func() tea.Msg {
+				return OpenModalMsg{M: ConfirmModal{
+					message: fmt.Sprintf("Log work for %s?", key),
+					onConfirm: func() tea.Msg {
+						return OpenModalMsg{M: NewNumericHoursModal(
+							fmt.Sprintf("Hours to log for %s", key),
+							func(hours int) tea.Cmd {
+								return logWorkBoardCmd(jr, key, 8, 0, 8+hours, 0)
+							},
+						)}
 					},
-				)}
-			}
-		}
-
-	case "l": // log full day 8:00-16:00 (confirm)
-		if issue := s.selectedIssue(); issue != nil && s.jira != nil {
-			jr, key := s.jira, issue.Key
-			return s, func() tea.Msg {
-				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Log full day (8h) for %s?", key),
-					onConfirm: logWorkBoardCmd(jr, key, 8, 0, 16, 0),
-				}}
-			}
-		}
-
-	case "h": // log half day 8:00-12:00 (confirm)
-		if issue := s.selectedIssue(); issue != nil && s.jira != nil {
-			jr, key := s.jira, issue.Key
-			return s, func() tea.Msg {
-				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Log half day (4h) for %s?", key),
-					onConfirm: logWorkBoardCmd(jr, key, 8, 0, 12, 0),
 				}}
 			}
 		}
@@ -390,20 +397,22 @@ func (s BoardSection) handleKey(msg tea.KeyMsg) (BoardSection, tea.Cmd) {
 
 	case "b": // pop up repo select modal to checkout new branch
 		if issue := s.selectedIssue(); issue != nil && len(s.repos) > 0 {
-			issue := *issue // capture
+			issueCopy := *issue // capture
 			repos := s.repos
 			names := make([]string, len(repos))
 			for i, r := range repos {
 				names[i] = r.Name
 			}
-			branchName := integration.BuildBranchName(issue)
+			branchName := integration.BuildBranchName(issueCopy)
 			git := s.git
+			fs := s.fs
+			shell := s.shell
 			return s, func() tea.Msg {
 				return OpenModalMsg{M: ListSelectModal{
 					title: fmt.Sprintf("Create branch %s in:", branchName),
 					items: names,
 					onSelect: func(idx int) tea.Cmd {
-						return checkoutNewBranchCmd(git, repos[idx], branchName)
+						return checkoutNewBranchCmd(git, repos[idx], branchName, issueCopy, fs, shell)
 					},
 				}}
 			}
@@ -430,6 +439,7 @@ func (s BoardSection) buildCommandPalette(issue service.Issue) []CommandEntry {
 
 	key := issue.Key
 	jr := s.jira
+	tmplStore := s.templatesStore
 
 	// description
 	entries = append(entries, CommandEntry{Key: "enter", Desc: "description", Cmd: tea.Batch(
@@ -441,35 +451,40 @@ func (s BoardSection) buildCommandPalette(issue service.Issue) []CommandEntry {
 		entries = append(entries,
 			CommandEntry{Key: "i", Desc: "in progress", Cmd: func() tea.Msg {
 				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Move %s → In Progress and assign to me?", key),
+					message:   fmt.Sprintf("Move %s → In Progress?", key),
 					onConfirm: pickIssueCmd(jr, key),
 				}}
 			}},
 			CommandEntry{Key: "t", Desc: "testing", Cmd: func() tea.Msg {
 				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Move %s → Testing and unassign?", key),
+					message:   fmt.Sprintf("Move %s → Testing?", key),
 					onConfirm: moveToTestingCmd(jr, key),
 				}}
 			}},
 			CommandEntry{Key: "a", Desc: "assign to me", Cmd: assignToMeCmd(jr, key)},
 			CommandEntry{Key: "u", Desc: "unassign", Cmd: unassignCmd(jr, key)},
 			CommandEntry{Key: "c", Desc: "comment", Cmd: func() tea.Msg {
-				return OpenModalMsg{M: NewInputModal(
-					fmt.Sprintf("Comment on %s", key),
-					"Type your comment...",
-					func(text string) tea.Cmd { return addCommentCmd(jr, key, text) },
-				)}
+				commentTitle := fmt.Sprintf("Comment on %s", key)
+				onConfirm := func(text string) tea.Cmd { return addCommentCmd(jr, key, text) }
+				if tmplStore != nil {
+					tmpls, err := tmplStore.List()
+					if err == nil && len(tmpls) > 0 {
+						return OpenModalMsg{M: newCommentWithTemplateModal(tmpls, commentTitle, onConfirm)}
+					}
+				}
+				return OpenModalMsg{M: newCommentInputModal(commentTitle, "", onConfirm)}
 			}},
-			CommandEntry{Key: "l", Desc: "log full day", Cmd: func() tea.Msg {
+			CommandEntry{Key: "l", Desc: "log work", Cmd: func() tea.Msg {
 				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Log full day (8h) for %s?", key),
-					onConfirm: logWorkBoardCmd(jr, key, 8, 0, 16, 0),
-				}}
-			}},
-			CommandEntry{Key: "h", Desc: "log half day", Cmd: func() tea.Msg {
-				return OpenModalMsg{M: ConfirmModal{
-					message:   fmt.Sprintf("Log half day (4h) for %s?", key),
-					onConfirm: logWorkBoardCmd(jr, key, 8, 0, 12, 0),
+					message: fmt.Sprintf("Log work for %s?", key),
+					onConfirm: func() tea.Msg {
+						return OpenModalMsg{M: NewNumericHoursModal(
+							fmt.Sprintf("Hours to log for %s", key),
+							func(hours int) tea.Cmd {
+								return logWorkBoardCmd(jr, key, 8, 0, 8+hours, 0)
+							},
+						)}
+					},
 				}}
 			}},
 		)
@@ -505,6 +520,9 @@ func (s BoardSection) buildCommandPalette(issue service.Issue) []CommandEntry {
 		repos := s.repos
 		branchName := integration.BuildBranchName(issue)
 		git := s.git
+		fs := s.fs
+		shell := s.shell
+		issueCopy := issue
 		names := make([]string, len(repos))
 		for i, r := range repos {
 			names[i] = r.Name
@@ -514,7 +532,7 @@ func (s BoardSection) buildCommandPalette(issue service.Issue) []CommandEntry {
 				title: fmt.Sprintf("Create branch %s in:", branchName),
 				items: names,
 				onSelect: func(idx int) tea.Cmd {
-					return checkoutNewBranchCmd(git, repos[idx], branchName)
+					return checkoutNewBranchCmd(git, repos[idx], branchName, issueCopy, fs, shell)
 				},
 			}}
 		}})

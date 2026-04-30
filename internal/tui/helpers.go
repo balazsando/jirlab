@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -77,6 +78,37 @@ func copyToClipboard(shell integration.ShellService, text string) tea.Cmd {
 
 // clipboardCopiedMsg is returned after a clipboard copy attempt.
 type clipboardCopiedMsg struct{ text string }
+
+// SaveTicketDescription writes the ticket description to {repoPath}/.jirlab/ticket/{key}.md
+// and returns the file path. Exported for acceptance tests.
+func SaveTicketDescription(fs integration.FilesystemService, repoPath string, issue service.Issue) (string, error) {
+	filePath := repoPath + "/.jirlab/ticket/" + issue.Key + ".md"
+	content := "# " + issue.Key + "\n\n"
+	if issue.Description != "" {
+		content += issue.Description + "\n"
+	} else {
+		content += "_No description available._\n"
+	}
+	if err := fs.SaveFile(filePath, []byte(content)); err != nil {
+		return "", err
+	}
+	return filePath, nil
+}
+
+// SaveMRPatch writes patch data to {repoPath}/.jirlab/mr/{name}.patch
+// where name is the ticket key resolved from the MR source branch (or mr-{IID} fallback).
+// Returns the saved file path. Exported for acceptance tests.
+func SaveMRPatch(fs integration.FilesystemService, repoPath string, mr service.MergeRequest, data []byte) (string, error) {
+	name := extractIssueKey(mr.SourceBranch)
+	if name == "" {
+		name = fmt.Sprintf("mr-%d", mr.IID)
+	}
+	filePath := repoPath + "/.jirlab/mr/" + name + ".patch"
+	if err := fs.SaveFile(filePath, data); err != nil {
+		return "", err
+	}
+	return filePath, nil
+}
 
 // overlayCenter renders a modal string centred over the background string,
 // keeping the underlying background content visible around the modal box.

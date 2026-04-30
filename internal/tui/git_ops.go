@@ -78,7 +78,9 @@ func checkoutDevelopCmd(git integration.GitCmdService, repo service.Repo) tea.Cm
 
 // checkoutNewBranchCmd stashes changes, updates the default branch, then creates
 // and checks out a new feature branch. Stash is re-applied afterwards.
-func checkoutNewBranchCmd(git integration.GitCmdService, repo service.Repo, branchName string) tea.Cmd {
+// On success it saves the ticket description to .jirlab/ticket/<key>.md and copies
+// the file path to the clipboard (best-effort; errors are silently ignored).
+func checkoutNewBranchCmd(git integration.GitCmdService, repo service.Repo, branchName string, issue service.Issue, fs integration.FilesystemService, shell integration.ShellService) tea.Cmd {
 	return func() tea.Msg {
 		repoPath := repo.Path
 		baseBranch := repoDefaultBranch(repo)
@@ -104,6 +106,12 @@ func checkoutNewBranchCmd(git integration.GitCmdService, repo service.Repo, bran
 
 		if stashed {
 			_ = git.StashPop(repoPath)
+		}
+
+		if fs != nil && shell != nil {
+			if filePath, err := SaveTicketDescription(fs, repoPath, issue); err == nil {
+				_ = shell.CopyToClipboard(filePath)
+			}
 		}
 
 		return boardActionDoneMsg{

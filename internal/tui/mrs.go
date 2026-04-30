@@ -2,7 +2,6 @@ package tui
 
 import (
 	"fmt"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -225,13 +224,14 @@ func (s MRsSection) handleKey(msg tea.KeyMsg) (MRsSection, tea.Cmd) {
 		if mr := s.selected(); mr != nil && mr.WebURL != "" {
 			return s, openBrowserCmd(s.shell, mr.WebURL)
 		}
-	case "p": // download patch file to repo/.mr/<issue>.patch
+	case "p": // download patch file to repo/.jirlab/mr/<issue>.patch
 		if mr := s.selected(); mr != nil && mr.WebURL != "" && s.gitlab != nil {
 			mrCopy := *mr
 			repos := s.repos
 			glab := s.gitlab
 			fs := s.fs
-			return s, downloadMRPatchCmd(glab, fs, mrCopy, repos)
+			shell := s.shell
+			return s, downloadMRPatchCmd(glab, fs, shell, mrCopy, repos)
 		}
 	case "m":
 		if mr := s.selected(); mr != nil && mr.IsMine {
@@ -302,7 +302,8 @@ func (s MRsSection) buildCommandPalette() []CommandEntry {
 		repos := s.repos
 		glab := s.gitlab
 		fs := s.fs
-		entries = append(entries, CommandEntry{Key: "p", Desc: "patch file", Cmd: downloadMRPatchCmd(glab, fs, mrCopy, repos)})
+		shell := s.shell
+		entries = append(entries, CommandEntry{Key: "p", Desc: "patch file", Cmd: downloadMRPatchCmd(glab, fs, shell, mrCopy, repos)})
 	}
 	{
 		mrCopy := *mr
@@ -504,10 +505,10 @@ func (s MRsSection) viewPipelinesPane(width, height int) string {
 func (s MRsSection) helpKeys() []HelpEntry { return MRsKeys }
 
 // downloadMRPatchCmd downloads a merge request's .patch file and saves it to
-// {repoPath}/.mr/{issueKey}.patch (falls back to mr-{IID}.patch when no issue key).
-func downloadMRPatchCmd(gitlab integration.GitLabService, fs integration.FilesystemService, mr service.MergeRequest, repos []service.Repo) tea.Cmd {
+// {repoPath}/.jirlab/mr/{issueKey}.patch (falls back to mr-{IID}.patch when no issue key).
+// On success it also copies the file path to the clipboard.
+func downloadMRPatchCmd(gitlab integration.GitLabService, fs integration.FilesystemService, shell integration.ShellService, mr service.MergeRequest, repos []service.Repo) tea.Cmd {
 	return func() tea.Msg {
-		// Find the local repo path that matches this MR's project.
 		repoPath := ""
 		for _, r := range repos {
 			if r.GitLabProjectID == mr.ProjectID {
@@ -524,15 +525,14 @@ func downloadMRPatchCmd(gitlab integration.GitLabService, fs integration.Filesys
 			return errMsg{source: "mrs", err: fmt.Errorf("download patch: %w", err)}
 		}
 
-		filename := mr.IssueKey
-		if filename == "" {
-			filename = fmt.Sprintf("mr-%d", mr.IID)
-		}
-		patchPath := filepath.Join(repoPath, ".mr", filename+".patch")
-		if err := fs.SaveFile(patchPath, data); err != nil {
+		patchPath, err := SaveMRPatch(fs, repoPath, mr, data)
+		if err != nil {
 			return errMsg{source: "mrs", err: fmt.Errorf("write patch: %w", err)}
 		}
 
+		if shell != nil {
+			_ = shell.CopyToClipboard(patchPath)
+		}
 		return mrsActionDoneMsg{message: fmt.Sprintf("Patch saved → %s", patchPath)}
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -758,7 +759,7 @@ func (c *gitLabClient) ListPipelineJobs(projectID, pipelineID int) ([]PipelineJo
 // and returns the merged YAML after GitLab resolves all !include directives.
 // This is the same data source the browser "Run Pipeline" dialog uses to list variables.
 func (c *gitLabClient) GetCILint(projectID int, ref string) ([]byte, error) {
-	u := fmt.Sprintf("%s/projects/%d/ci/lint?ref=%s", c.apiURL, projectID, ref)
+	u := fmt.Sprintf("%s/projects/%d/ci/lint?ref=%s", c.apiURL, projectID, url.QueryEscape(ref))
 	req, err := c.newRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -782,15 +783,16 @@ func (c *gitLabClient) GetCILint(projectID int, ref string) ([]byte, error) {
 // Endpoint: POST /projects/:id/pipeline
 func (c *gitLabClient) TriggerPipelineRun(projectID int, ref string, variables map[string]string) (*Pipeline, error) {
 	type varEntry struct {
-		Key   string `json:"key"`
-		Value string `json:"value"`
+		Key          string `json:"key"`
+		Value        string `json:"value"`
+		VariableType string `json:"variable_type"`
 	}
 	body := struct {
 		Ref       string     `json:"ref"`
 		Variables []varEntry `json:"variables,omitempty"`
 	}{Ref: ref}
 	for k, v := range variables {
-		body.Variables = append(body.Variables, varEntry{Key: k, Value: v})
+		body.Variables = append(body.Variables, varEntry{Key: k, Value: v, VariableType: "env_var"})
 	}
 	payload, _ := json.Marshal(body)
 	u := fmt.Sprintf("%s/projects/%d/pipeline", c.apiURL, projectID)

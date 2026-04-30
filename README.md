@@ -1,6 +1,6 @@
 # jirlab
 
-A terminal UI for Jira sprint boards, GitLab merge requests, Kubernetes workloads and time tracking.
+A terminal UI for Jira sprint boards, GitLab merge requests, Kubernetes workloads, time tracking, and Microsoft Teams chats.
 
 ---
 
@@ -13,9 +13,9 @@ A terminal UI for Jira sprint boards, GitLab merge requests, Kubernetes workload
    - [Repositories (2)](#repositories-2)
    - [Merge Requests (3)](#merge-requests-3)
    - [Kubernetes (4)](#kubernetes-4)
-   - [Time Tracker (5)](#time-tracker-5)
-     - [Worklogs panel](#worklogs-panel)
-     - [Notes panel](#notes-panel)
+   - [Chats (5)](#chats-5)
+     - [Chats panel](#chats-panel)
+     - [Notes & Templates panel](#notes--templates-panel)
 3. [Theming](#theming)
 4. [CLI Reference](#cli-reference)
 5. [Further Reading](#further-reading)
@@ -94,6 +94,9 @@ export JIRA_BOARD_ID="42"                  # numeric board ID from your Jira boa
 export GITLAB_TOKEN="<personal-access-token>"   # api scope required
 export GITLAB_API_URL="https://gitlab.yourcompany.com"
 
+# Microsoft Graph (optional — enables Chats section)
+export AZURE_CLIENT_ID="<app-registration-client-id>"  # see Chats section for setup
+
 # Optional: restrict repository scan to a specific directory (faster startup)
 # Defaults to $HOME when not set
 export REPOS_DIR="$HOME/projects"
@@ -110,8 +113,16 @@ $HOME/
 │   # Config files must follow the pattern: config-<name>.yaml or config-<name>.yml
 │   # Priority order: test → preprod → prod → alphabetical
 │
+├── .jirlab/
+│   └── msgraph_token.json     # MS Graph OAuth token (created on first auth)
+│
 ├── project-a/                 # Your project repos (in $HOME)
 │   ├── .gitlab-ci.yml         # Required for jirlab to discover the repo
+│   ├── .jirlab/
+│   │   ├── ticket/            # Ticket descriptions saved on branch creation
+│   │   │   └── PROJ-42.md
+│   │   └── mr/                # MR patch files downloaded from GitLab
+│   │       └── PROJ-42.patch
 │   └── ...
 ├── project-b/
 │   └── .gitlab-ci.yml
@@ -193,11 +204,10 @@ Shows your team's active sprint issues. Issues are colour-coded by their MR and 
 | `r` | Open the MR for this issue in the browser |
 | `w` | Open the Jira ticket in the browser |
 | `m` | Merge the MR (with confirm) |
-| `b` | Create a new branch for this issue across your local repos |
+| `b` | Create a new branch for this issue across your local repos (saves ticket description to `.jirlab/ticket/<key>.md`, copies path to clipboard) |
 | `n` | Navigate your shell CWD to the repo that has this issue's branch |
 | `c` | Add a Jira comment |
-| `l` | Log a full day (08:00–16:00) to this issue (with confirm) |
-| `h` | Log a half day (08:00–12:00) to this issue (with confirm) |
+| `l` | Log hours to this issue — opens a single-digit input modal; new log starts after the last existing log for the day |
 | `f` | Toggle filter: show only your issues |
 | `→` | Open command palette with all available actions |
 
@@ -245,7 +255,7 @@ Each repo has subtabs (`r` branches, `t` tags, `m` MRs, `p` pipelines) with thei
 | `b` | Create a new branch |
 | `g` | Stage all changes, enter commit message, and push |
 | `i` | Trigger a CI/CD pipeline (choose ref) |
-| `c` | Create a merge request for the current branch |
+| `c` | Create a merge request for the current branch (MR browser URL copied to clipboard) |
 | `o` | Open repo in editor (choose: `c` VS Code, `i` IntelliJ IDEA, `v` vim) |
 | `v` | Copy Maven version to clipboard |
 | `w` | Open GitLab repo URL in browser |
@@ -272,7 +282,7 @@ Shows all open MRs across your local repos (both created by you and assigned to 
 |-----|--------|
 | `↑` / `k`, `↓` / `j` | Navigate MRs |
 | `enter` / `w` | Open MR in browser |
-| `p` | Download MR diff patch (saved to `{repo}/.mr/{issue}.patch`) |
+| `p` | Download MR diff patch (saved to `{repo}/.jirlab/mr/{ticket}.patch`, path copied to clipboard) |
 | `c` | Checkout MR branch locally |
 | `m` | Merge MR (with confirm) |
 | `d` | Close MR (with confirm) |
@@ -280,7 +290,9 @@ Shows all open MRs across your local repos (both created by you and assigned to 
 
 **MR diff patch** (`p` key) fetches all changed files from the GitLab API
 (`GET /api/v4/projects/:id/merge_requests/:iid/diffs`) and saves a
-`git apply`-compatible unified diff to `{local_repo}/.mr/{issue}.patch`.
+`git apply`-compatible unified diff to `{local_repo}/.jirlab/mr/{ticket}.patch`
+(ticket number resolved from the source branch name; falls back to `mr-{id}.patch`).
+The file path is copied to clipboard. The `.jirlab/mr/` directory is created automatically.
 Requires GitLab 15.7+. Needs `read_api` token scope.
 
 ---
@@ -337,30 +349,56 @@ Two-pane view: **top pane** lists kubeconfig files; **bottom pane** shows pods, 
 
 ---
 
-### Time Tracker `5`
+### Chats `5`
 
-Two-panel view: **top panel** shows Jira worklogs for the selected day; **bottom panel** is the Notes manager. Press `tab` to move keyboard focus between panels.
+Two-panel view: **top panel** lists your pinned/favorited Microsoft Teams conversations; **bottom panel** is the Notes & Templates manager (see below). Press `tab` to move keyboard focus between panels.
 
-**Worklogs panel**
+#### Prerequisites: Azure App Registration
 
-| Colour | Meaning |
-|--------|---------|
-| Red | 0 h logged |
-| Yellow | > 0 h and < 8 h |
-| Green | ≥ 8 h |
+The Chats panel requires your own Azure App Registration (not the Microsoft Azure CLI app, which cannot be used for `Chat.Read` due to Microsoft policy). This is a one-time setup:
+
+1. Open [Azure Portal → Microsoft Entra ID → App registrations](https://portal.azure.com/#blade/Microsoft_AAD_IAM/ActiveDirectoryMenuBlade/RegisteredApps) → **New registration**.
+2. Name it anything (e.g. `jirlab`). Leave redirect URI blank. Click **Register**.
+3. Under **Authentication** → **Advanced settings** → enable **Allow public client flows** → Save.
+4. Under **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated** → select `Chat.Read` → Add. Then **Grant admin consent** (or ask your tenant admin).
+5. Copy the **Application (client) ID** from the Overview page.
+6. Add it to your `.env`:
+   ```
+   AZURE_CLIENT_ID=<your-application-client-id>
+   ```
+
+Without `AZURE_CLIENT_ID` set, the Chats panel will show a configuration message and the auth flow will not start.
+
+#### Microsoft Graph Authentication
+
+On first launch, jirlab attempts to load a saved token from `~/.jirlab/msgraph_token.json`. If no token exists, the top panel shows a placeholder row:
+
+```
+Authentication required — press Enter to authenticate
+```
+
+Pressing `enter` starts the **Device Code Flow**:
+
+1. jirlab opens `https://login.microsoft.com/device` in your default browser.
+2. The user code is copied to your clipboard automatically.
+3. Paste the code in the browser and sign in with your Microsoft 365 account.
+4. After sign-in, press any key in jirlab to exchange the code for a token.
+5. The token is saved to `~/.jirlab/msgraph_token.json` (mode `0600`).
+
+Subsequent launches are seamless — no browser needed.
+
+**Chats panel**
 
 | Key | Action |
 |-----|--------|
-| `↑` / `k`, `↓` / `j` | Navigate entries |
-| `←` / `→` | Previous / next day |
-| `l` | Log full day (08:00–16:00) |
-| `h` | Log half day (08:00–12:00) |
-| `w` | Open Jira time tracker in browser |
-| `tab` | Move focus to Notes panel |
+| `↑` / `k`, `↓` / `j` | Navigate chats |
+| `enter` | Trigger authentication (if not authenticated) |
+| `r` | Refresh chats list |
+| `tab` | Move focus to Notes & Templates panel |
 
-**Notes panel**
+#### Notes & Templates panel
 
-A persistent note manager stored in `~/.jirlab/notes.json`.
+A persistent note and template manager stored in `~/.jirlab/notes.json` and `~/.jirlab/templates.json`.
 
 | Colour | Meaning |
 |--------|---------|
@@ -370,13 +408,15 @@ A persistent note manager stored in `~/.jirlab/notes.json`.
 
 | Key | Action |
 |-----|--------|
-| `↑` / `k`, `↓` / `j` | Navigate notes |
-| `n` | Create new note (modal with tab-switching fields) |
-| `enter` | Open note detail / toggle tasks |
-| `d` | Delete selected note (with confirm) |
-| `s` | Cycle sort: date → priority → remaining tasks |
-| `f` | Cycle category filter (cycles through all categories, then back to "all") |
-| `tab` | Move focus back to Worklogs panel |
+| `↑` / `k`, `↓` / `j` | Navigate entries |
+| `o` | Switch to Notes sub-pane |
+| `t` | Switch to Templates sub-pane |
+| `n` | Create new note / template (modal) |
+| `enter` | Open note detail / edit template |
+| `d` | Delete selected entry (with confirm) |
+| `s` | Cycle sort: date → priority → remaining tasks (notes only) |
+| `f` | Cycle category filter (notes only) |
+| `tab` | Move focus back to Chats panel |
 
 **Creating a note** — the create modal (`n`) has five tab-switchable fields:
 - **Title** (required)
@@ -387,8 +427,10 @@ A persistent note manager stored in `~/.jirlab/notes.json`.
 
 When all tasks in a note are completed, jirlab prompts: **Keep** (`k`) or **Delete** (`d`).
 
-The active filter and sort mode are shown in the panel header:  
+The active filter and sort mode are shown in the panel header:
 `── Notes (5) [work] [priority] ──────`
+
+> **Log worklogs from Board**: Time logs are entered from the Sprint Board (`l` key) and are stored in Jira. The `l` key opens a single-digit hours input modal; the new log starts immediately after the last existing log for the current day (preventing overlap).
 
 ---
 

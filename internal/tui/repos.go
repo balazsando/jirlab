@@ -599,13 +599,14 @@ func (s ReposSection) handleKey(msg tea.KeyMsg) (ReposSection, tea.Cmd) {
 					return s, nil
 				}
 				r, glab := *repo, s.gitlab
+				shell := s.shell
 				defaultTitle := fmt.Sprintf("Merge Request for %s", r.CurrentBranch)
 				return s, func() tea.Msg {
 					return OpenModalMsg{M: NewInputModalWithValue(
 						fmt.Sprintf("Create MR: %s → %s", r.CurrentBranch, targetBranch),
 						defaultTitle,
 						func(title string) tea.Cmd {
-							return createMRCmd(glab, r, targetBranch, title)
+							return createMRCmd(glab, shell, r, targetBranch, title)
 						},
 					)}
 				}
@@ -1161,8 +1162,9 @@ func repoGitStatsCell(gs service.GitStats) string {
 	return strings.Join(parts, " ")
 }
 
-// createMRCmd opens a new merge request on GitLab for the given repo.
-func createMRCmd(gitlab integration.GitLabService, repo service.Repo, targetBranch, title string) tea.Cmd {
+// createMRCmd opens a new merge request on GitLab for the given repo and copies
+// the MR browser URL to the clipboard on success.
+func createMRCmd(gitlab integration.GitLabService, shell integration.ShellService, repo service.Repo, targetBranch, title string) tea.Cmd {
 	return func() tea.Msg {
 		if gitlab == nil || repo.GitLabProjectID == 0 {
 			return errMsg{source: "repos", err: fmt.Errorf("GitLab not configured for %s", repo.Name)}
@@ -1170,6 +1172,9 @@ func createMRCmd(gitlab integration.GitLabService, repo service.Repo, targetBran
 		mr, err := gitlab.CreateMR(repo.GitLabProjectID, repo.CurrentBranch, targetBranch, title)
 		if err != nil {
 			return errMsg{source: "repos", err: fmt.Errorf("create MR: %w", err)}
+		}
+		if shell != nil && mr.WebURL != "" {
+			_ = shell.CopyToClipboard(mr.WebURL)
 		}
 		return repoActionDoneMsg{message: fmt.Sprintf("MR created: %s", mr.WebURL)}
 	}
@@ -1253,7 +1258,7 @@ func (s ReposSection) buildCommandPalette(repo service.Repo) []CommandEntry {
 					return OpenModalMsg{M: NewInputModalWithValue(
 						fmt.Sprintf("Create MR: %s → %s", repo.CurrentBranch, targetBranch),
 						defaultTitle,
-						func(title string) tea.Cmd { return createMRCmd(gitlab, repo, targetBranch, title) },
+						func(title string) tea.Cmd { return createMRCmd(gitlab, shell, repo, targetBranch, title) },
 					)}
 				}})
 			}

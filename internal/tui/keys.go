@@ -12,7 +12,7 @@ var GlobalKeys = []HelpEntry{
 	{"2", "Repositories"},
 	{"3", "Merge Requests"},
 	{"4", "Kubernetes"},
-	{"5", "Time Tracker"},
+	{"5", "Chats"},
 	{"0", "refresh"},
 	{"?", "toggle help"},
 	{"esc", "close modal"},
@@ -34,7 +34,7 @@ var BoardKeys = []HelpEntry{
 	{"m", "merge MR (confirm)"},
 	{"b", "create branch in repo"},
 	{"n", "navigate to repo folder"},
-	{"c", "add comment"},
+	{"c", "add comment (template picker)"},
 	{"l", "log full day 8-16 (confirm)"},
 	{"h", "log half day 8-12 (confirm)"},
 	{"f", "toggle filter"},
@@ -78,9 +78,10 @@ var MRsKeys = []HelpEntry{
 var TrackerKeys = []HelpEntry{
 	{"↑/k", "up"},
 	{"↓/j", "down"},
-	{"tab", "switch pane (worklogs/notes)"},
-	{"l", "log full day (8-16)"},
-	{"h", "log half day (8-12)"},
+	{"tab", "cycle panes"},
+	{"o", "notes pane"},
+	{"t", "templates pane"},
+	{"l", "log hours"},
 	{"←/→", "prev/next day"},
 	{"w", "open timetracker in browser"},
 }
@@ -89,12 +90,49 @@ var TrackerKeys = []HelpEntry{
 var TrackerNotesKeys = []HelpEntry{
 	{"↑/k", "up"},
 	{"↓/j", "down"},
-	{"tab", "switch to worklogs"},
+	{"tab", "cycle panes"},
+	{"o", "notes pane (current)"},
+	{"t", "templates pane"},
 	{"n", "new note"},
 	{"enter", "open note"},
 	{"d", "delete note"},
 	{"s", "cycle sort"},
 	{"f", "cycle category filter"},
+}
+
+// TrackerTemplatesKeys are the hotkeys for the Time Tracker — Templates pane.
+var TrackerTemplatesKeys = []HelpEntry{
+	{"↑/k", "up"},
+	{"↓/j", "down"},
+	{"tab", "cycle panes"},
+	{"o", "notes pane"},
+	{"t", "templates pane (current)"},
+	{"n", "new template"},
+	{"enter", "edit template"},
+	{"d", "delete template"},
+}
+
+// ChatsTopKeys are the hotkeys for the Chats section top pane (Teams conversations).
+var ChatsTopKeys = []HelpEntry{
+	{"↑/k", "up"},
+	{"↓/j", "down"},
+	{"tab", "switch to notes/templates pane"},
+	{"enter", "authenticate (if required)"},
+	{"r", "refresh chats"},
+}
+
+// ChatsNotesKeys are the hotkeys for the Chats section bottom pane.
+var ChatsNotesKeys = []HelpEntry{
+	{"↑/k", "up"},
+	{"↓/j", "down"},
+	{"tab", "switch to chats pane"},
+	{"o", "notes sub-pane"},
+	{"t", "templates sub-pane"},
+	{"n", "new note/template"},
+	{"enter", "open note / edit template"},
+	{"d", "delete"},
+	{"s", "cycle sort (notes)"},
+	{"f", "cycle category filter (notes)"},
 }
 
 // KubeKeys are the hotkeys available in the Kubernetes section.

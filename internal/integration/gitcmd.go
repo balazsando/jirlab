@@ -31,6 +31,8 @@ type GitCmdService interface {
 	CreateAndCheckoutBranch(repoPath, branch string) error
 	// Fetch runs `git fetch <remote> <ref>` in repoPath.
 	Fetch(repoPath, remote, ref string) error
+	// FetchAll runs `git fetch --all --prune` in repoPath to update all remotes.
+	FetchAll(repoPath string) error
 	// WriteNavPath writes the path to /tmp/jirlab_nav for the shell wrapper cd.
 	WriteNavPath(repoPath string) error
 	// StageAllCommitPush stages all changes, commits with message, and pushes.
@@ -128,6 +130,13 @@ func (g *gitCmdService) CreateAndCheckoutBranch(repoPath, branch string) error {
 func (g *gitCmdService) Fetch(repoPath, remote, ref string) error {
 	if err := exec.Command("git", "-C", repoPath, "fetch", remote, ref).Run(); err != nil {
 		return fmt.Errorf("git fetch %s %s: %w", remote, ref, err)
+	}
+	return nil
+}
+
+func (g *gitCmdService) FetchAll(repoPath string) error {
+	if err := exec.Command("git", "-C", repoPath, "fetch", "--all", "--prune").Run(); err != nil {
+		return fmt.Errorf("git fetch --all --prune: %w", err)
 	}
 	return nil
 }

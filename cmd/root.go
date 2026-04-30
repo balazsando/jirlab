@@ -77,4 +77,5 @@ func init() {
 	rootCmd.AddCommand(boardCmd)
 	rootCmd.AddCommand(issueCmd)
 	rootCmd.AddCommand(gitCmd)
+	rootCmd.AddCommand(noteCmd)
 }

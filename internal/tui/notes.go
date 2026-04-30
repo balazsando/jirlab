@@ -1,10 +1,7 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -12,60 +9,26 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/andob/jirlab/internal/notes"
 )
 
 // ---------------------------------------------------------------------------
-// Note data model
+// Note helpers (TUI-layer only — colour and display logic)
 // ---------------------------------------------------------------------------
 
-type notePriority int
-
-const (
-	notePriorityLow notePriority = iota
-	notePriorityMedium
-	notePriorityHigh
-)
-
-func (p notePriority) String() string {
+func notePriorityColor(p notes.Priority) lipgloss.Color {
 	switch p {
-	case notePriorityHigh:
-		return "High"
-	case notePriorityMedium:
-		return "Med"
-	default:
-		return "Low"
-	}
-}
-
-func (p notePriority) Color() lipgloss.Color {
-	switch p {
-	case notePriorityHigh:
+	case notes.PriorityHigh:
 		return colorRed
-	case notePriorityMedium:
+	case notes.PriorityMedium:
 		return colorYellow
 	default:
 		return colorGreen
 	}
 }
 
-type noteTask struct {
-	ID   string `json:"id"`
-	Text string `json:"text"`
-	Done bool   `json:"done"`
-}
-
-type note struct {
-	ID          string       `json:"id"`
-	Title       string       `json:"title"`
-	Category    string       `json:"category"`
-	Priority    notePriority `json:"priority"`
-	Description string       `json:"description"`
-	Tasks       []noteTask   `json:"tasks"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
-}
-
-func (n note) remainingTasks() int {
+func noteRemainingTasks(n notes.Note) int {
 	count := 0
 	for _, t := range n.Tasks {
 		if !t.Done {
@@ -75,59 +38,47 @@ func (n note) remainingTasks() int {
 	return count
 }
 
-func (n note) taskSummary() string {
+func noteTaskSummary(n notes.Note) string {
 	if len(n.Tasks) == 0 {
 		return "-"
 	}
-	done := len(n.Tasks) - n.remainingTasks()
+	done := len(n.Tasks) - noteRemainingTasks(n)
 	return fmt.Sprintf("%d/%d", done, len(n.Tasks))
 }
 
 // ---------------------------------------------------------------------------
-// Notes persistence
+// Persistence tea.Cmds
 // ---------------------------------------------------------------------------
 
-func notesFilePath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return ".jirlab-notes.json"
-	}
-	return filepath.Join(home, ".jirlab", "notes.json")
+// notesSavedMsg is returned after a successful note file operation.
+type notesSavedMsg struct{}
+
+// noteSavedMsg is sent when a note is created or updated.
+type noteSavedMsg struct {
+	note  notes.Note
+	isNew bool
 }
 
-func loadNotes(path string) []note {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil // missing file is fine
-	}
-	var notes []note
-	if err := json.Unmarshal(data, &notes); err != nil {
-		return nil // corrupt file: start fresh
-	}
-	return notes
-}
+// noteRemovedMsg is sent when a note should be deleted from the store.
+type noteRemovedMsg struct{ id string }
 
-func saveNotesCmd(path string, notes []note) tea.Cmd {
+func notePersistCmd(store notes.Store, n notes.Note) tea.Cmd {
 	return func() tea.Msg {
-		data, err := json.MarshalIndent(notes, "", "  ")
-		if err != nil {
-			return errMsg{source: "notes", err: err}
-		}
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return errMsg{source: "notes", err: err}
-		}
-		if err := os.WriteFile(path, data, 0o644); err != nil {
+		if err := store.Save(n); err != nil {
 			return errMsg{source: "notes", err: err}
 		}
 		return notesSavedMsg{}
 	}
 }
 
-// notesSavedMsg is returned after a successful notes save.
-type notesSavedMsg struct{}
-
-// notesUpdatedMsg is sent when notes data changes in the tracker.
-type notesUpdatedMsg struct{ notes []note }
+func noteDeleteFileCmd(store notes.Store, id string) tea.Cmd {
+	return func() tea.Msg {
+		if err := store.Delete(id); err != nil {
+			return errMsg{source: "notes", err: err}
+		}
+		return notesSavedMsg{}
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Sort helpers
@@ -136,7 +87,7 @@ type notesUpdatedMsg struct{ notes []note }
 type notesSortMode int
 
 const (
-	notesSortDate notesSortMode = iota
+	notesSortDate      notesSortMode = iota
 	notesSortPriority
 	notesSortRemaining
 )
@@ -152,9 +103,9 @@ func (m notesSortMode) Label() string {
 	}
 }
 
-func sortNotes(notes []note, mode notesSortMode) []note {
-	out := make([]note, len(notes))
-	copy(out, notes)
+func sortNotes(ns []notes.Note, mode notesSortMode) []notes.Note {
+	out := make([]notes.Note, len(ns))
+	copy(out, ns)
 	switch mode {
 	case notesSortPriority:
 		sort.SliceStable(out, func(i, j int) bool {
@@ -162,7 +113,7 @@ func sortNotes(notes []note, mode notesSortMode) []note {
 		})
 	case notesSortRemaining:
 		sort.SliceStable(out, func(i, j int) bool {
-			return out[i].remainingTasks() > out[j].remainingTasks()
+			return noteRemainingTasks(out[i]) > noteRemainingTasks(out[j])
 		})
 	default: // date, newest first
 		sort.SliceStable(out, func(i, j int) bool {
@@ -172,12 +123,12 @@ func sortNotes(notes []note, mode notesSortMode) []note {
 	return out
 }
 
-func filterNotes(notes []note, category string) []note {
+func filterNotes(ns []notes.Note, category string) []notes.Note {
 	if category == "" {
-		return notes
+		return ns
 	}
-	var out []note
-	for _, n := range notes {
+	var out []notes.Note
+	for _, n := range ns {
 		if n.Category == category {
 			out = append(out, n)
 		}
@@ -185,10 +136,10 @@ func filterNotes(notes []note, category string) []note {
 	return out
 }
 
-func uniqueCategories(notes []note) []string {
+func uniqueCategories(ns []notes.Note) []string {
 	seen := make(map[string]bool)
 	var cats []string
-	for _, n := range notes {
+	for _, n := range ns {
 		if n.Category != "" && !seen[n.Category] {
 			seen[n.Category] = true
 			cats = append(cats, n.Category)
@@ -217,13 +168,13 @@ const (
 type NoteCreateModal struct {
 	fields     [noteFieldCount]textinput.Model
 	focusedIdx noteCreateField
-	priority   notePriority
+	priority   notes.Priority
 	tasks      []string
 	categories []string // existing categories for hint display
-	onConfirm  func(n note) tea.Cmd
+	onConfirm  func(n notes.Note) tea.Cmd
 }
 
-func NewNoteCreateModal(existingCategories []string, onConfirm func(n note) tea.Cmd) NoteCreateModal {
+func NewNoteCreateModal(existingCategories []string, onConfirm func(n notes.Note) tea.Cmd) NoteCreateModal {
 	m := NoteCreateModal{
 		categories: existingCategories,
 		onConfirm:  onConfirm,
@@ -279,9 +230,9 @@ func (m NoteCreateModal) update(msg tea.Msg) (modal, tea.Cmd) {
 	case "left", "right":
 		if m.focusedIdx == noteFieldPriority {
 			if k.String() == "right" {
-				m.priority = (m.priority + 1) % 3
+				m.priority = notes.Priority((int(m.priority) + 1) % 3)
 			} else {
-				m.priority = (m.priority + 2) % 3
+				m.priority = notes.Priority((int(m.priority) + 2) % 3)
 			}
 			return m, nil
 		}
@@ -321,12 +272,16 @@ func (m NoteCreateModal) confirm() (modal, tea.Cmd) {
 		return m, nil // require at least a title
 	}
 	now := time.Now()
-	id := fmt.Sprintf("%d", now.UnixNano())
-	tasks := make([]noteTask, len(m.tasks))
-	for i, t := range m.tasks {
-		tasks[i] = noteTask{ID: fmt.Sprintf("%d-%d", now.UnixNano(), i), Text: t}
+	id, err := notes.NewID()
+	if err != nil {
+		id = fmt.Sprintf("%d", now.UnixNano()) // fallback
 	}
-	n := note{
+	tasks := make([]notes.Task, len(m.tasks))
+	for i, t := range m.tasks {
+		taskID, _ := notes.NewID()
+		tasks[i] = notes.Task{ID: taskID, Text: t}
+	}
+	n := notes.Note{
 		ID:          id,
 		Title:       title,
 		Category:    strings.TrimSpace(m.fields[noteFieldCategory].Value()),
@@ -375,7 +330,7 @@ func (m NoteCreateModal) view(width, _ int) string {
 
 	// Priority
 	prioLabel := lbl(noteFieldPriority, "Priority")
-	prioVal := lipgloss.NewStyle().Foreground(m.priority.Color()).Bold(true).Render(m.priority.String())
+	prioVal := lipgloss.NewStyle().Foreground(notePriorityColor(m.priority)).Bold(true).Render(m.priority.String())
 	if m.focusedIdx == noteFieldPriority {
 		prioVal += hintStyle.Render("  ← →")
 	}
@@ -408,14 +363,13 @@ func (m NoteCreateModal) view(width, _ int) string {
 
 // NoteDetailModal shows a note's details and lets the user toggle tasks.
 type NoteDetailModal struct {
-	noteIdx    int // index in the source notes slice
-	n          note
+	n          notes.Note
 	taskCursor int
-	onSave     func(updated note) tea.Cmd
+	onSave     func(updated notes.Note) tea.Cmd
 }
 
-func NewNoteDetailModal(idx int, n note, onSave func(updated note) tea.Cmd) NoteDetailModal {
-	return NoteDetailModal{noteIdx: idx, n: n, onSave: onSave}
+func NewNoteDetailModal(n notes.Note, onSave func(updated notes.Note) tea.Cmd) NoteDetailModal {
+	return NoteDetailModal{n: n, onSave: onSave}
 }
 
 func (m NoteDetailModal) update(msg tea.Msg) (modal, tea.Cmd) {
@@ -442,15 +396,14 @@ func (m NoteDetailModal) update(msg tea.Msg) (modal, tea.Cmd) {
 		m.n.UpdatedAt = time.Now()
 
 		// If we just completed the last remaining task, prompt delete/keep.
-		if m.n.Tasks[m.taskCursor].Done && m.n.remainingTasks() == 0 && len(m.n.Tasks) > 0 {
+		if m.n.Tasks[m.taskCursor].Done && noteRemainingTasks(m.n) == 0 && len(m.n.Tasks) > 0 {
 			updatedNote := m.n
 			onSave := m.onSave
-			idx := m.noteIdx
 			return nil, func() tea.Msg {
 				return OpenModalMsg{M: noteAllDoneModal{
-					noteIdx: idx,
-					n:       updatedNote,
-					onSave:  onSave,
+					noteID: updatedNote.ID,
+					n:      updatedNote,
+					onSave: onSave,
 				}}
 			}
 		}
@@ -473,7 +426,7 @@ func (m NoteDetailModal) view(width, height int) string {
 	var sb strings.Builder
 	sb.WriteString(modalTitleStyle.Render(m.n.Title) + "\n\n")
 	sb.WriteString(row("Category", m.n.Category))
-	prioStr := lipgloss.NewStyle().Foreground(m.n.Priority.Color()).Bold(true).Render(m.n.Priority.String())
+	prioStr := lipgloss.NewStyle().Foreground(notePriorityColor(m.n.Priority)).Bold(true).Render(m.n.Priority.String())
 	sb.WriteString(row("Priority", prioStr))
 	sb.WriteString(row("Created", m.n.CreatedAt.Format("2006-01-02 15:04")))
 	if m.n.Description != "" {
@@ -513,12 +466,11 @@ func (m NoteDetailModal) view(width, height int) string {
 
 // ---------------------------------------------------------------------------
 // noteAllDoneModal — prompt after last task is completed
-// ---------------------------------------------------------------------------
 
 type noteAllDoneModal struct {
-	noteIdx int
-	n       note
-	onSave  func(updated note) tea.Cmd
+	noteID string
+	n      notes.Note
+	onSave func(updated notes.Note) tea.Cmd
 }
 
 func (m noteAllDoneModal) update(msg tea.Msg) (modal, tea.Cmd) {
@@ -532,8 +484,9 @@ func (m noteAllDoneModal) update(msg tea.Msg) (modal, tea.Cmd) {
 		return nil, m.onSave(m.n)
 	case "d", "D":
 		// delete
+		id := m.noteID
 		return nil, func() tea.Msg {
-			return noteDeleteMsg{noteIdx: m.noteIdx}
+			return noteRemovedMsg{id: id}
 		}
 	case "esc":
 		return nil, m.onSave(m.n)
@@ -553,5 +506,4 @@ func (m noteAllDoneModal) view(width, _ int) string {
 	return modalBoxStyle.Width(maxW).Render(body)
 }
 
-// noteDeleteMsg is sent when the user chooses to delete a fully-completed note.
-type noteDeleteMsg struct{ noteIdx int }
+
